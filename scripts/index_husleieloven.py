@@ -26,10 +26,10 @@ def main():
         openrouter_api_key="not-needed-for-indexing",
         qdrant_in_memory=True,
         qdrant_persist_path="./qdrant_data",
-        embedding_model_name="sentence-transformers/all-MiniLM-L6-v2",  # Smaller model for testing
-        embedding_dimension=384,  # MiniLM dimension
+        embedding_model_name="BAAI/bge-m3",  # Multilingual model for Norwegian legal text
+        embedding_dimension=1024,  # BGE-M3 dimension
         index_batch_size=50,
-        embedding_batch_size=16,
+        embedding_batch_size=8,  # Smaller batch for larger model
     )
 
     # Path to Husleieloven

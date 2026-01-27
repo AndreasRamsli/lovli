@@ -135,6 +135,26 @@ black src/
 ruff check src/
 ```
 
+## Evaluation
+
+We use a structured evaluation workflow to verify retrieval fidelity and citation accuracy.
+
+### 1. Retrieval Evaluation
+Measures Recall@k and Precision@k for the vector search step.
+
+```bash
+python scripts/eval_retrieval.py
+```
+
+### 2. Answer & Citation Evaluation
+Measures end-to-end accuracy, citation match rate, and generates a review file for manual adjudication.
+
+```bash
+python scripts/eval_answers.py
+```
+
+Results are saved in `eval/` as JSONL files. A `eval/review.csv` file is generated for manual inspection of failed or suspicious cases.
+
 ## License
 
 MIT License

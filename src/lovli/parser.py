@@ -99,11 +99,18 @@ def _parse_lovdata_html(xml_path: Path) -> Iterator[LegalArticle]:
             # Article ID from the element's id attribute
             article_id = article.get("id") or f"{law_id}_art_{idx}"
 
+            # COARSE CHUNKING: Only index at paragraph level
+            # Skip sub-articles like "kapittel-X-paragraf-Y-ledd-Z" or "X-punkt-Y"
+            # This ensures we index whole paragraphs for better semantic matching
+            if "-ledd-" in article_id or "-punkt-" in article_id:
+                logger.debug(f"Skipping sub-article {article_id} (indexing at paragraph level)")
+                continue
+
             # Article title from <h3> element
             h3 = article.find("h3")
             title_text = h3.get_text(strip=True) if h3 else "Untitled Article"
 
-            # Extract article content (full text)
+            # Extract article content (full text including all sub-articles)
             article_content = article.get_text(separator="\n", strip=True)
 
             # Skip empty articles

@@ -29,3 +29,4 @@ This roadmap outlines the steps to build the first version of the Lovli legal as
 - **Multi-Law Support**: Expand beyond *Husleieloven* to all consumer laws.
 - **Proactive Alerts**: Notify users when relevant laws change.
 - **Document Analysis**: Allow users to upload their own lease agreements for checking against the law.
+- **Query Semantic Validation**: Use an LLM to analyze question semantics before retrieval to ensure the correct documents are fetched.

@@ -205,17 +205,22 @@ class LegalIndexer:
                 logger.error(f"Failed to generate embeddings for batch chunk: {e}")
                 raise RuntimeError(f"Embedding generation failed: {e}") from e
 
+        # Store in QdrantVectorStore-compatible format:
+        # - page_content: document text (for retrieval)
+        # - metadata: nested dict with article info (for citations)
         points = [
             PointStruct(
                 id=_generate_deterministic_id(article.article_id),
                 vector=embedding.tolist(),
                 payload={
-                    "article_id": article.article_id,
-                    "title": article.title,
-                    "content": article.content,
-                    "law_id": article.law_id,
-                    "law_title": article.law_title,
-                    "url": article.url,
+                    "page_content": article.content,
+                    "metadata": {
+                        "article_id": article.article_id,
+                        "title": article.title,
+                        "law_id": article.law_id,
+                        "law_title": article.law_title,
+                        "url": article.url,
+                    },
                 },
             )
             for article, embedding in zip(batch, embeddings)

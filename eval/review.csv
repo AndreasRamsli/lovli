@@ -1,0 +1,55 @@
+id,status,question,answer,expected,cited,correct_citation (y/n),correct_answer (y/n),comments
+q008,MISSING_CITATION,Hva skjer hvis leiligheten ikke er klar ved innflytting?,"Basert på teksten du oppga, spesielt **§ 2-1** og **§ 2-2**, vil følgende skje:
+
+1.  **Utleierens plikt:** Utleieren har plikt til å stille husrommet med tilbehør til leierens disposisjon til den avta...","kapittel-2-paragraf-10, kapittel-2-paragraf-13, kapittel-2-paragraf-11, kapittel-2-paragraf-12","kapittel-2-paragraf-2, kapittel-11-paragraf-2, kapittel-10-paragraf-3, kapittel-5-paragraf-6, kapittel-2-paragraf-1",,,
+q012,MISSING_CITATION,Hva er reglene for utleie av hybel?,"Basert på teksten du oppga, finnes det ikke en generell oversikt over reglene for hybelleie (kapittel 7) i utdraget. Teksten fokuserer heller på spesifikke situasjoner, som utleie av egen bolig eller ...",kapittel-9-paragraf-7,"kapittel-5-paragraf-2, kapittel-11-paragraf-4, kapittel-3-paragraf-1, kapittel-11-paragraf-1, kapittel-4-paragraf-6",,,
+q014,MISSING_CITATION,Hva gjør jeg hvis det er muggsopp i leiligheten?,"Basert på lovteksten du oppga (Leieavtaleloven), er her fremgangsmåten for hvordan du bør håndtere situasjonen med muggsopp:
+
+**1. Send melding til utleier umiddelbart**
+Hvis du oppdager skade på husr...","kapittel-2-paragraf-10, kapittel-2-paragraf-2","kapittel-5-paragraf-6, kapittel-5-paragraf-5, kapittel-10-paragraf-3, kapittel-3-paragraf-8, kapittel-5-paragraf-3",,,
+q001,EXTRA_CITATION,Hvor mye kan utleier kreve i depositum?,"Ifølge loven kan utleier kreve et depositum oppad begrenset til **summen av seks måneders leie**.
+
+Her er hva loven sier om dette:
+
+*   **§ 3-5 (Depositum):** Det kan avtales at leieren skal deponere ...",kapittel-3-paragraf-5,"kapittel-3-paragraf-5, kapittel-3-paragraf-6, kapittel-3-paragraf-1, kapittel-3-paragraf-8, kapittel-4-paragraf-4",,,
+q002,EXTRA_CITATION,Kan utleier øke husleien hvert år?,"Ja, utleier kan kreve leieendring uten å avslutte leieavtalen, men dette er begrenset av reglene i **§ 4-2**.
+
+For at utleier kan øke leien, må følgende krav være oppfylt:
+
+1.  **Tidsfrist:** Det må h...",kapittel-4-paragraf-2,"kapittel-3-paragraf-1, kapittel-3-paragraf-4, kapittel-9-paragraf-10, kapittel-4-paragraf-3, kapittel-4-paragraf-2",,,
+q003,EXTRA_CITATION,Hva er oppsigelsestiden for en vanlig leilighet?,"For en vanlig leilighet er oppsigelsestiden **tre måneder**.
+
+Dette fremgår av **§ 9-6** første ledd i Leieboerloven, som fastslår at oppsigelsesfristen skal være tre måneder til opphør ved utløpet av...",kapittel-9-paragraf-7,"kapittel-9-paragraf-7, kapittel-9-paragraf-8, kapittel-9-paragraf-9, kapittel-9-paragraf-2, kapittel-9-paragraf-6",,,
+q004,EXTRA_CITATION,Hvem har ansvaret for vedlikehold av dørlåser og kraner?,"Ifølge teksten i **§ 5-3** har **leieren** ansvaret for vedlikehold av dørlåser og kraner, **med mindre noe annet er avtalt**.
+
+Teksten sier følgende:
+> ""Er ikke annet avtalt, plikter leieren å vedlik...",kapittel-5-paragraf-3,"kapittel-5-paragraf-3, kapittel-10-paragraf-4, kapittel-5-paragraf-6, kapittel-3-paragraf-4, kapittel-6-paragraf-3",,,
+q005,EXTRA_CITATION,Når kan utleier heve leiekontrakten?,"Basert på teksten du oppga, kan utleier heve leieavtalen i to hovedscenarioer:
+
+**1. På grunn av vesentlig mislighold fra leierens side (§ 9-9)**
+Utleier kan heve avtalen dersom leier har misligholdt ...",kapittel-9-paragraf-10,"kapittel-2-paragraf-12, kapittel-9-paragraf-10, kapittel-9-paragraf-6, kapittel-9-paragraf-2, kapittel-9-paragraf-11",,,
+q006,EXTRA_CITATION,Må depositumet stå på en egen konto?,"Ja, det skal.
+
+Ifølge **§ 3-5** i teksten skal det deponerte beløpet settes på en **særskilt konto** i leierens navn. Det er også et krav at finansinstitusjonen har rett til å tilby slik tjeneste i No...",kapittel-3-paragraf-5,"kapittel-3-paragraf-5, nl-19990326-017_art_131, kapittel-3-paragraf-8, kapittel-3-paragraf-6, kapittel-3-paragraf-3",,,
+q007,EXTRA_CITATION,Kan utleier gå inn i leiligheten når som helst?,"Nei, utleier kan ikke gå inn i leiligheten når som helst.
+
+Ifølge **§ 5-6** i leieavtaleloven må leieren ha melding i **rimelig tid** før det foretas tilsyn eller vedlikeholdsarbeider.
+
+Utleierens adg...",kapittel-5-paragraf-6,"kapittel-9-paragraf-3, kapittel-5-paragraf-6, kapittel-5-paragraf-1, kapittel-9-paragraf-6, kapittel-11-paragraf-4",,,
+q009,EXTRA_CITATION,Er det lov å ha husdyr i leiebolig?,"Basert på teksten fra **Leieavtaleloven § 5-2** som du oppga, er svaret at det er mulig å ha husdyr, men det er ikke et automatisk ja. Det avhenger av om det er avtalt noe annet i leiekontrakten og om...",kapittel-5-paragraf-2,"kapittel-5-paragraf-2, kapittel-5-paragraf-3, kapittel-9-paragraf-3, kapittel-5-paragraf-4, kapittel-1-paragraf-8",,,
+q010,EXTRA_CITATION,Hva skal skje med leiligheten ved tilbakelevering?,"Basert på lovteksten du oppga (spesielt **§ 10-2** og **§ 2-2** i Leieavtaleloven), skal leiligheten leveres tilbake i en spesifikk stand og tilgjengelighet.
+
+Her er en oppsummering av hva som skal sk...",kapittel-10-paragraf-2,"kapittel-10-paragraf-2, kapittel-2-paragraf-1, kapittel-3-paragraf-8, kapittel-10-paragraf-4, kapittel-2-paragraf-2",,,
+q011,EXTRA_CITATION,Kan utleier kreve leie for en måned forskuddsvis?,"Ja, utleier kan kreve leie for en måned forskuddsvis, men det kan ikke avtales betaling for lengre tid enn én måned på forhånd.
+
+Her er hva loven sier:
+
+*   **Generelt:** Ifølge **§ 3-2** kan utleiere...",kapittel-3-paragraf-2,"kapittel-3-paragraf-2, kapittel-11-paragraf-2, kapittel-7-paragraf-5, kapittel-4-paragraf-3, kapittel-2-paragraf-13",,,
+q013,EXTRA_CITATION,Kan jeg fremleie leiligheten min?,"Basert på lovteksten du oppga, er svaret avhengig av din spesifikke situasjon, men det er en generell regel om at du trenger samtykke.
+
+Her er en oversikt basert på paragrafene du oppga:
+
+**1. Generel...","kapittel-7-paragraf-3, kapittel-7-paragraf-4, kapittel-7-paragraf-2","kapittel-7-paragraf-3, kapittel-7-paragraf-4, kapittel-11-paragraf-1, kapittel-7-paragraf-5, kapittel-7-paragraf-2",,,
+q015,EXTRA_CITATION,Er en tidsbestemt leieavtale på 1 år lovlig?,"Generelt sett er det **ikke lovlig** å inngå en tidsbestemt leieavtale for bolig på 1 år, da minstetiden er tre år ifølge **§ 9-3 første ledd**.
+
+Det er imidlertid visse unntak der en avtale på 1 år k...",kapittel-9-paragraf-3,"kapittel-9-paragraf-3, kapittel-9-paragraf-1, kapittel-9-paragraf-2, kapittel-9-paragraf-4, kapittel-11-paragraf-1",,,
