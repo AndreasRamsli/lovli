@@ -1,30 +1,59 @@
 # Lovli - Legal RAG Assistant
 
-A Retrieval-Augmented Generation (RAG) assistant for Norwegian legal information, built with LangChain, Qdrant, and GLM-4.7.
+A multi-stage Retrieval-Augmented Generation (RAG) assistant for Norwegian legal information, built with LangChain, Qdrant, and BGE-M3.
 
 ## Overview
 
-Lovli helps private users find information about Norwegian laws using natural language queries. The system uses legal documents from Lovdata (under NLOD 2.0 license) and provides answers with proper citations.
+Lovli helps private users find information about Norwegian laws using natural language queries. The system uses legal documents from Lovdata (under NLOD 2.0 license) covering all 735+ current Norwegian laws, and provides answers with proper citations and source links.
 
-**⚠️ Disclaimer**: This tool provides legal information, not legal advice. For professional legal advice, please consult a qualified lawyer.
+**Warning**: This tool provides legal information, not legal advice. For professional legal advice, please consult a qualified lawyer.
 
 ## Features
 
 - Natural language queries about Norwegian laws
-- Semantic search using BGE-M3 embeddings
-- Answers with source citations
+- Multi-stage retrieval: query analysis -> law routing -> hybrid search -> reranking
+- Hybrid search combining semantic (dense) and keyword (sparse) matching
+- Answers with inline source citations and Lovdata links
+- Real-time streaming responses
 - Streamlit-based chat interface
-- Focus on tenant rights (Husleieloven) for MVP
+- Evaluation via LangSmith with LLM-as-judge
+
+## Architecture
+
+```
+User Question
+    |
+    v
+Query Analysis (classify, rewrite, extract refs)
+    |
+    v
+Law Routing (identify relevant laws from catalog)
+    |
+    v
+Hybrid Search (dense + sparse vectors, metadata-filtered)
+    |
+    v
+Reranking (cross-encoder rescoring)
+    |
+    v
+Answer Generation (streaming, inline citations)
+```
+
+See [docs/RAG_CONCEPTS.md](docs/RAG_CONCEPTS.md) for a detailed explanation of each stage.
 
 ## Tech Stack
 
 - **Python 3.11+**
-- **LangChain** - RAG orchestration
-- **Qdrant** - Vector database
-- **BGE-M3** - Multilingual embeddings
+- **LangChain / LangGraph** - RAG orchestration and multi-step pipeline
+- **LangSmith** - Evaluation and observability
+- **Qdrant** - Vector database with hybrid search (dense + sparse)
+- **BGE-M3** - Multilingual embeddings (dense + sparse)
+- **bge-reranker-v2-m3** - Cross-encoder reranker
 - **GLM-4 / Any LLM** - Via OpenRouter API (supports 100+ models)
 - **Streamlit** - Web UI
-- **BeautifulSoup4** - XML parsing
+- **BeautifulSoup4** - HTML parsing
+
+See [docs/TECH_STACK.md](docs/TECH_STACK.md) for detailed architecture decisions.
 
 ## Setup
 
@@ -33,7 +62,6 @@ Lovli helps private users find information about Norwegian laws using natural la
 - Python 3.11 or higher
 - Qdrant instance (Cloud, local Docker, or in-memory for testing)
 - OpenRouter API key (get one at https://openrouter.ai/)
-- (Optional) Hugging Face API token for embeddings
 
 ### Installation
 
@@ -91,17 +119,22 @@ Lovli helps private users find information about Norwegian laws using natural la
 
 ```
 lovli/
-├── data/                    # Raw XML files from Lovdata
+├── data/                    # Raw HTML files from Lovdata (gitignored)
 │   ├── nl/                  # Norwegian laws
 │   └── sf/                  # Regulations
 ├── docs/                    # Documentation
+│   ├── PROJECT_ROADMAP.md   # Development roadmap and milestones
+│   ├── TECH_STACK.md        # Architecture and technology choices
+│   └── RAG_CONCEPTS.md      # Retrieval pipeline concepts explained
+├── eval/                    # Evaluation datasets and results
+├── scripts/                 # Utility scripts (eval, dataset upload)
 ├── src/
 │   └── lovli/
 │       ├── __init__.py
 │       ├── config.py        # Settings and configuration
-│       ├── parser.py         # XML parsing logic
-│       ├── indexer.py        # Vector indexing
-│       └── chain.py          # LangChain RAG pipeline
+│       ├── parser.py        # HTML parsing logic
+│       ├── indexer.py       # Vector indexing
+│       └── chain.py         # RAG pipeline
 ├── app.py                   # Streamlit entry point
 ├── pyproject.toml           # Project metadata and dependencies
 ├── .env.example             # Template for API keys
@@ -118,6 +151,7 @@ lovli/
 ## Data Sources
 
 - **Lovdata**: Norwegian legal data under NLOD 2.0 license
+- Bulk downloads: `gjeldende-lover.tar.bz2` (laws) and `gjeldende-sentrale-forskrifter.tar.bz2` (regulations)
 - Data files should be placed in `data/nl/` (laws) and `data/sf/` (regulations)
 
 ## Development
@@ -137,23 +171,25 @@ ruff check src/
 
 ## Evaluation
 
-We use a structured evaluation workflow to verify retrieval fidelity and citation accuracy.
-
-### 1. Retrieval Evaluation
-Measures Recall@k and Precision@k for the vector search step.
+We use **LangSmith** for comprehensive evaluation with experiment tracking and LLM-as-judge evaluation across each pipeline stage.
 
 ```bash
-python scripts/eval_retrieval.py
+# One-time: upload dataset to LangSmith
+python scripts/upload_dataset.py
+
+# Run evaluation experiment
+python scripts/eval_langsmith.py
 ```
 
-### 2. Answer & Citation Evaluation
-Measures end-to-end accuracy, citation match rate, and generates a review file for manual adjudication.
+Results are tracked in LangSmith with detailed metrics and experiment comparison.
 
-```bash
-python scripts/eval_answers.py
-```
+## Roadmap
 
-Results are saved in `eval/` as JSONL files. A `eval/review.csv` file is generated for manual inspection of failed or suspicious cases.
+See [docs/PROJECT_ROADMAP.md](docs/PROJECT_ROADMAP.md) for the full development roadmap, covering:
+- Phase 4: Retrieval quality (hybrid search, reranking, confidence gating)
+- Phase 5: Extended parser and data enrichment
+- Phase 6: Multi-stage retrieval pipeline with three-tier indexing
+- Phase 7: Full-corpus validation and deployment
 
 ## License
 
@@ -163,8 +199,4 @@ MIT License
 
 - Lovdata for providing free access to legal data under NLOD 2.0
 - OpenRouter for unified LLM API access
-- BAAI for BGE-M3 embeddings
-
-## Roadmap
-
-See [docs/PROJECT_ROADMAP.md](docs/PROJECT_ROADMAP.md) for planned features and improvements.
+- BAAI for BGE-M3 embeddings and bge-reranker-v2-m3
