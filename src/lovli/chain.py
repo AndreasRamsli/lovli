@@ -1,15 +1,22 @@
 """LangChain RAG pipeline for legal question answering."""
 
-from typing import Dict, Any
-from langchain_qdrant import QdrantVectorStore
+import logging
+from typing import Dict, Any, Iterator, Tuple
+from langchain_qdrant import QdrantVectorStore, RetrievalMode
 from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_classic.chains import create_retrieval_chain
-from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from qdrant_client import QdrantClient
+from sentence_transformers import CrossEncoder
 
 from .config import Settings, get_settings
+
+logger = logging.getLogger(__name__)
+MAX_QUESTION_LENGTH = 1000
+
+# Query rewriting constants
+QUERY_REWRITE_MIN_LENGTH_RATIO = 0.5  # Rewritten query must be at least 50% of original length
+QUERY_REWRITE_HISTORY_WINDOW = 4  # Last 4 messages (2 turns) for context
 
 
 class LegalRAGChain:
@@ -17,7 +24,7 @@ class LegalRAGChain:
 
     def __init__(self, settings: Settings | None = None):
         """
-        Initialize the RAG chain with Qdrant vector store and GLM-4.7 LLM.
+        Initialize the RAG chain with Qdrant vector store and LLM.
 
         Args:
             settings: Application settings (defaults to loading from env)
@@ -40,112 +47,377 @@ class LegalRAGChain:
                 url=self.settings.qdrant_url,
                 api_key=self.settings.qdrant_api_key,
             )
-        # Initialize Qdrant vector store (new API uses query_points)
-        self.vectorstore = QdrantVectorStore(
-            client=qdrant_client,
-            collection_name=self.settings.qdrant_collection_name,
-            embedding=self.embeddings,
-        )
 
-        # Initialize LLM via OpenRouter (OpenAI-compatible API)
+        # Determine if collection uses named vectors (hybrid search with BGE-M3)
+        self._uses_named_vectors = False
+        if "bge-m3" in self.settings.embedding_model_name.lower():
+            try:
+                if qdrant_client.collection_exists(self.settings.qdrant_collection_name):
+                    collection_info = qdrant_client.get_collection(self.settings.qdrant_collection_name)
+                    config = collection_info.config
+                    if hasattr(config, 'params') and hasattr(config.params, 'sparse_vectors_config'):
+                        sparse_cfg = config.params.sparse_vectors_config
+                        if sparse_cfg and len(sparse_cfg) > 0:
+                            self._uses_named_vectors = True
+            except Exception:
+                pass
+
+        # When using named vectors, QdrantVectorStore needs vector_name='dense'
+        vs_kwargs = {
+            "client": qdrant_client,
+            "collection_name": self.settings.qdrant_collection_name,
+            "embedding": self.embeddings,
+        }
+        if self._uses_named_vectors:
+            vs_kwargs["vector_name"] = "dense"
+            logger.info("Using named vector 'dense' for QdrantVectorStore (hybrid collection)")
+        
+        self.vectorstore = QdrantVectorStore(**vs_kwargs)
+
+        # Initialize LLM via OpenRouter
         self.llm = ChatOpenAI(
             model=self.settings.llm_model,
             temperature=self.settings.llm_temperature,
             api_key=self.settings.openrouter_api_key,
             base_url=self.settings.openrouter_base_url,
             default_headers={
-                "HTTP-Referer": "https://github.com/lovli",  # Optional: for OpenRouter rankings
-                "X-Title": "Lovli Legal Assistant",  # Optional: app name for OpenRouter
+                "HTTP-Referer": "https://github.com/lovli",
+                "X-Title": "Lovli Legal Assistant",
             },
         )
+        
+        # Initialize reranker if enabled
+        self.reranker = None
+        if self.settings.reranker_enabled:
+            try:
+                logger.info(f"Loading reranker model: {self.settings.reranker_model}")
+                self.reranker = CrossEncoder(self.settings.reranker_model)
+                logger.info("Reranker loaded successfully")
+            except Exception as e:
+                logger.warning(f"Failed to load reranker, continuing without reranking: {e}")
+                self.reranker = None
 
-        # Create prompt template with legal disclaimers
+        # Prompt template
         self.prompt_template = ChatPromptTemplate.from_messages([
-            ("system", """Du er en hjelpsom assistent som gir informasjon om norsk lov basert på Lovdata.
+            ("system", """Du er en hjelpsom assistent som gir KORT og PRESIS informasjon om norsk lov basert på Lovdata.
 
-VIKTIG DISCLAIMER:
-- Dette er IKKE juridisk rådgivning
-- Informasjonen er kun til informasjonsformål
-- For juridisk rådgivning, kontakt en advokat
-- Lovdata er kilde for all informasjon
+Regler:
+- Svar kortfattet (maks 3-4 setninger for enkle spørsmål)
+- Referer til relevante paragrafer (f.eks. § 3-5)
+- Ikke gjenta disclaimer i svaret - det vises separat i appen
+- Hvis spørsmålet er uklart eller kan gjelde flere områder av loven, still oppfølgingsspørsmål for å avklare hva brukeren faktisk spør om
+- Eksempler på uklare spørsmål: "Hva er reglene?", "Hva kan jeg gjøre?", "Er det lovlig?"
+- I slike tilfeller, spør konkret: "Hvilket område av husleieloven er du interessert i? For eksempel depositum, oppsigelse, eller husleieøkning?"
 
 Kontekst fra lovtekster:
 {context}"""),
             ("human", "{input}"),
         ])
 
-        # Create document chain
-        document_chain = create_stuff_documents_chain(
-            llm=self.llm,
-            prompt=self.prompt_template,
+        # Use hybrid search if collection has sparse vectors configured
+        retrieval_mode = RetrievalMode.DENSE
+        if self._uses_named_vectors:
+            retrieval_mode = RetrievalMode.HYBRID
+            logger.info("Using hybrid search (dense + sparse vectors)")
+        
+        # Reusable retriever with hybrid search support
+        # Use initial k for over-retrieval (reranker will reduce to final k)
+        retrieval_k = self.settings.retrieval_k_initial if self.reranker else self.settings.retrieval_k
+        self.retriever = self.vectorstore.as_retriever(
+            search_kwargs={
+                "k": retrieval_k,
+                "mode": retrieval_mode,
+            }
         )
 
-        # Create retriever
-        retriever = self.vectorstore.as_retriever(
-            search_kwargs={"k": self.settings.retrieval_k}
-        )
+    def _validate_question(self, question: str) -> str:
+        """Validate and normalize question input."""
+        if not question or not question.strip():
+            raise ValueError("Vennligst skriv inn et spørsmål.")
+        question = question.strip()
+        if len(question) > MAX_QUESTION_LENGTH:
+            question = question[:MAX_QUESTION_LENGTH]
+        return question
 
-        # Create retrieval chain
-        self.qa_chain = create_retrieval_chain(
-            retriever=retriever,
-            combine_docs_chain=document_chain,
-        )
+    def _format_context(self, sources: list[Dict[str, Any]]) -> str:
+        """Format retrieved sources into a single context string."""
+        return "\n\n".join([
+            f"Lov: {s['law_title']} (§ {s['article_id']})\n{s.get('content', '')}"
+            for s in sources
+        ])
 
-    def query(self, question: str) -> Dict[str, Any]:
+    def _extract_sources(
+        self, 
+        docs: list, 
+        include_content: bool = False
+    ) -> list[Dict[str, Any]]:
+        """Extract deduplicated source metadata from documents."""
+        sources = []
+        seen_ids = set()
+        for doc in docs:
+            metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+            article_id = metadata.get("article_id", "Unknown")
+            if article_id not in seen_ids:
+                seen_ids.add(article_id)
+                source = {
+                    "law_id": metadata.get("law_id", "Unknown"),
+                    "law_title": metadata.get("law_title", "Unknown"),
+                    "law_short_name": metadata.get("law_short_name"),
+                    "article_id": article_id,
+                    "title": metadata.get("title", "Unknown"),
+                    "chapter_id": metadata.get("chapter_id"),
+                    "chapter_title": metadata.get("chapter_title"),
+                    "url": metadata.get("url"),
+                }
+                if include_content:
+                    source["content"] = doc.page_content if hasattr(doc, "page_content") else ""
+                sources.append(source)
+        return sources
+
+    def _rerank(self, query: str, docs: list, top_k: int | None = None) -> Tuple[list, list[float]]:
         """
-        Query the RAG chain with a legal question.
+        Rerank retrieved documents using cross-encoder reranker.
+
+        Args:
+            query: User's question
+            docs: List of retrieved documents (LangChain Document objects)
+            top_k: Number of top documents to return (defaults to settings.retrieval_k)
+
+        Returns:
+            Tuple of (reranked_docs, scores) where scores are relevance scores
+        """
+        if not self.reranker or len(docs) == 0:
+            return docs, [1.0] * len(docs)
+        
+        top_k = top_k or self.settings.retrieval_k
+        
+        # Prepare query-document pairs for reranking
+        pairs = []
+        for doc in docs:
+            # Extract text content
+            text = doc.page_content if hasattr(doc, "page_content") else str(doc)
+            pairs.append([query, text])
+        
+        # Rerank
+        try:
+            scores = self.reranker.predict(pairs)
+            # Convert to list if numpy array
+            if hasattr(scores, 'tolist'):
+                scores = scores.tolist()
+            else:
+                scores = list(scores)
+        except Exception as e:
+            logger.warning(f"Reranking failed, returning original order: {e}")
+            return docs, [1.0] * len(docs)
+        
+        # Sort by score (descending) and return top_k
+        scored_docs = list(zip(docs, scores))
+        scored_docs.sort(key=lambda x: x[1], reverse=True)
+        
+        reranked_docs = [doc for doc, _ in scored_docs[:top_k]]
+        reranked_scores = [score for _, score in scored_docs[:top_k]]
+        
+        return reranked_docs, reranked_scores
+
+    def _rewrite_query(
+        self, 
+        question: str, 
+        chat_history: list[Dict[str, str]] | None = None,
+        max_retries: int = 1
+    ) -> str:
+        """
+        Rewrite a follow-up question using chat history to make it standalone.
+
+        Args:
+            question: Current user question
+            chat_history: List of previous messages in format [{"role": "user/assistant", "content": "..."}]
+            max_retries: Maximum number of retry attempts if LLM call fails (default: 1)
+
+        Returns:
+            Rewritten standalone question, or original question if rewriting fails
+        """
+        if not chat_history or len(chat_history) == 0:
+            return question
+        
+        # Build context from last few messages
+        context_messages = []
+        # Use last N messages (excluding current question which isn't in history yet)
+        for msg in chat_history[-QUERY_REWRITE_HISTORY_WINDOW:]:
+            role = "User" if msg.get("role") == "user" else "Assistant"
+            content = msg.get("content", "").strip()
+            if content:  # Skip empty messages
+                context_messages.append(f"{role}: {content}")
+        
+        context = "\n".join(context_messages)
+        
+        rewrite_prompt = f"""Gitt denne samtalehistorikken, omskriv det siste spørsmålet som et selvstendig spørsmål som kan forstås uten kontekst.
+
+Samtalehistorikk:
+{context}
+
+Siste spørsmål: {question}
+
+Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmålet allerede er selvstendig, returner det uendret. Svar kun med det omskrevne spørsmålet, ingen forklaringer."""
+        
+        # Retry logic for transient failures
+        last_error = None
+        for attempt in range(max_retries + 1):
+            try:
+                # Use a shorter timeout for query rewriting to avoid blocking
+                # Note: ChatOpenAI doesn't support timeout directly, but OpenRouter may
+                response = self.llm.invoke(rewrite_prompt)
+                rewritten = response.content.strip() if hasattr(response, 'content') else str(response).strip()
+                
+                # Validate rewritten query
+                if not rewritten or len(rewritten.strip()) == 0:
+                    logger.debug("Query rewriting returned empty string, using original")
+                    return question
+                
+                # Fallback to original if rewrite is suspiciously short or identical
+                min_length = len(question) * QUERY_REWRITE_MIN_LENGTH_RATIO
+                if len(rewritten) < min_length:
+                    logger.debug(f"Rewritten query too short ({len(rewritten)} < {min_length}), using original")
+                    return question
+                
+                if rewritten.lower() == question.lower():
+                    logger.debug("Rewritten query identical to original, using original")
+                    return question
+                
+                logger.debug(f"Query rewritten: '{question}' -> '{rewritten}'")
+                return rewritten
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries:
+                    logger.debug(f"Query rewriting attempt {attempt + 1} failed, retrying: {e}")
+                else:
+                    logger.warning(f"Query rewriting failed after {max_retries + 1} attempts, using original query: {e}")
+        
+        # If all retries failed, return original question
+        return question
+
+    def retrieve(self, question: str, chat_history: list[Dict[str, str]] | None = None) -> Tuple[list[Dict[str, Any]], float | None]:
+        """
+        Retrieve relevant legal documents for a question.
+
+        Args:
+            question: User's legal question
+            chat_history: Optional chat history for query rewriting
+
+        Returns:
+            Tuple of (sources, top_score) where top_score is the highest reranker score (None if no reranking)
+
+        Raises:
+            ValueError: If question is empty
+        """
+        question = self._validate_question(question)
+        
+        # Rewrite query if chat history is provided
+        retrieval_query = self._rewrite_query(question, chat_history) if chat_history else question
+        
+        # Over-retrieve for reranking
+        docs = self.retriever.invoke(retrieval_query)
+        
+        top_score = None
+        # Rerank if enabled
+        if self.reranker and len(docs) > 0:
+            docs, scores = self._rerank(retrieval_query, docs, top_k=self.settings.retrieval_k)
+            top_score = scores[0] if scores else None
+            logger.debug(f"Reranked {len(docs)} documents, top score: {top_score:.3f if top_score else 0}")
+        
+        sources = self._extract_sources(docs, include_content=True)
+        return sources, top_score
+    
+    def should_gate_answer(self, top_score: float | None) -> bool:
+        """
+        Check if answer should be gated due to low confidence.
+
+        Args:
+            top_score: Highest reranker score (None if reranking disabled)
+
+        Returns:
+            True if answer should be gated (low confidence)
+        """
+        if top_score is None:
+            # No reranking, don't gate
+            return False
+        return top_score < self.settings.reranker_confidence_threshold
+
+    def stream_answer(self, question: str, sources: list[Dict[str, Any]], top_score: float | None = None) -> Iterator[str]:
+        """
+        Stream an answer for a question given retrieved sources.
+
+        Args:
+            question: User's legal question
+            sources: List of retrieved sources from retrieve()
+            top_score: Highest reranker score for confidence gating
+
+        Yields:
+            Tokens of the LLM response
+        """
+        # Confidence gating: if reranker score is too low, return canned response
+        if self.should_gate_answer(top_score):
+            yield "Jeg fant ikke et klart svar på spørsmålet ditt i lovtekstene. "
+            yield "Kunne du prøve å omformulere spørsmålet eller være mer spesifikk?"
+            return
+        
+        if not sources:
+            yield "Beklager, jeg kunne ikke finne informasjon om dette spørsmålet."
+            return
+        
+        context = self._format_context(sources)
+
+        # Use format_messages to preserve system/human role separation
+        messages = self.prompt_template.format_messages(context=context, input=question)
+
+        for chunk in self.llm.stream(messages):
+            if chunk.content:
+                yield chunk.content
+
+    def query(self, question: str, chat_history: list[Dict[str, str]] | None = None) -> Dict[str, Any]:
+        """
+        Query the RAG chain with a legal question (non-streaming).
+        
+        Uses the same pipeline as retrieve() + stream_answer() for consistency.
 
         Args:
             question: User's legal question in Norwegian
+            chat_history: Optional chat history for query rewriting
 
         Returns:
             Dictionary with 'answer' and 'sources' keys
         """
-        # Validate input
-        if not question or not question.strip():
+        try:
+            question = self._validate_question(question)
+        except ValueError as e:
+            return {"answer": str(e), "sources": []}
+
+        # Use the same retrieval pipeline as streaming API
+        sources, top_score = self.retrieve(question, chat_history=chat_history)
+        
+        # Check confidence gating
+        if self.should_gate_answer(top_score):
             return {
-                "answer": "Vennligst skriv inn et spørsmål.",
-                "sources": [],
+                "answer": "Jeg fant ikke et klart svar på spørsmålet ditt i lovtekstene. Kunne du prøve å omformulere spørsmålet eller være mer spesifikk?",
+                "sources": []
             }
-
-        # Limit query length to prevent abuse
-        if len(question) > 1000:
-            question = question[:1000]
-
-        result = self.qa_chain.invoke({"input": question})
-
-        # Extract answer - create_retrieval_chain returns "answer" key
-        answer = result.get("answer", "")
-
-        # Extract sources from context documents
-        sources = []
-        seen_ids = set()
-
-        # Context may be a list of documents or a single document
-        context = result.get("context", [])
-        if not isinstance(context, list):
-            context = [context] if context else []
-
-        for doc in context:
-            # Handle both Document objects and dicts
-            if hasattr(doc, "metadata"):
-                metadata = doc.metadata
-            elif isinstance(doc, dict):
-                metadata = doc.get("metadata", {})
-            else:
-                continue
-
-            article_id = metadata.get("article_id", "Unknown")
-            if article_id not in seen_ids:
-                seen_ids.add(article_id)
-                sources.append({
-                    "law_id": metadata.get("law_id", "Unknown"),
-                    "law_title": metadata.get("law_title", "Unknown"),
-                    "article_id": article_id,
-                    "title": metadata.get("title", "Unknown"),
-                })
-
-        return {
-            "answer": answer,
-            "sources": sources,
-        }
+        
+        if not sources:
+            return {
+                "answer": "Beklager, jeg kunne ikke finne informasjon om dette spørsmålet.",
+                "sources": []
+            }
+        
+        # Generate answer using same prompt template as streaming
+        context = self._format_context(sources)
+        
+        messages = self.prompt_template.format_messages(context=context, input=question)
+        response = self.llm.invoke(messages)
+        answer = response.content if hasattr(response, 'content') else str(response)
+        
+        # Return sources without content for consistency
+        sources_for_return = [
+            {k: v for k, v in s.items() if k != "content"}
+            for s in sources
+        ]
+        
+        return {"answer": answer, "sources": sources_for_return}

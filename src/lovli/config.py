@@ -9,18 +9,13 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     # OpenRouter API Configuration
-    openrouter_api_key: str = Field("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",
+    openrouter_api_key: str = Field(
+        ...,
         description="OpenRouter API key for LLM access",
     )
     openrouter_base_url: str = Field(
         default="https://openrouter.ai/api/v1",
         description="OpenRouter API base URL",
-    )
-
-    # Hugging Face API (optional, for embeddings)
-    hf_api_token: str | None = Field(
-        default=None,
-        description="Hugging Face API token (optional, for API-based embeddings)",
     )
 
     # Qdrant Configuration
@@ -58,7 +53,7 @@ class Settings(BaseSettings):
     # LLM Configuration (via OpenRouter)
     llm_model: str = Field(
         default="z-ai/glm-4.7-flash",
-        description="OpenRouter model name (e.g., z-ai/glm-4.7, openai/gpt-4o-mini)",
+        description="OpenRouter model name (e.g., z-ai/glm-4.7-flash, z-ai/glm-4.7, openai/gpt-4o-mini)",
     )
     llm_temperature: float = Field(
         default=0.1,
@@ -72,17 +67,29 @@ class Settings(BaseSettings):
         default=5,
         ge=1,
         le=20,
-        description="Number of documents to retrieve for RAG",
+        description="Number of documents to retrieve for RAG (final count after reranking)",
     )
-
-    # Data Paths (relative to project root)
-    data_nl_path: str = Field(
-        default="data/nl",
-        description="Path to Norwegian laws directory",
+    retrieval_k_initial: int = Field(
+        default=15,
+        ge=1,
+        le=50,
+        description="Number of documents to retrieve before reranking (over-retrieve for reranker)",
     )
-    data_sf_path: str = Field(
-        default="data/sf",
-        description="Path to regulations directory",
+    
+    # Reranker Configuration
+    reranker_model: str = Field(
+        default="BAAI/bge-reranker-v2-m3",
+        description="Cross-encoder reranker model for rescoring retrieved documents",
+    )
+    reranker_enabled: bool = Field(
+        default=True,
+        description="Enable cross-encoder reranking",
+    )
+    reranker_confidence_threshold: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="Minimum reranker score threshold for confidence gating",
     )
 
     # Indexing Configuration
@@ -97,6 +104,16 @@ class Settings(BaseSettings):
         ge=1,
         le=1000,
         description="Batch size for indexing articles",
+    )
+
+    # LangSmith Evaluation Configuration
+    langsmith_project: str | None = Field(
+        default="lovli-evals",
+        description="LangSmith project name for evaluation experiments",
+    )
+    eval_judge_model: str = Field(
+        default="gpt-4o-mini",
+        description="OpenAI model to use as LLM-as-judge for evaluations (e.g., gpt-4o-mini, gpt-4.1-mini)",
     )
 
     model_config = SettingsConfigDict(
@@ -115,14 +132,6 @@ class Settings(BaseSettings):
                 "OPENROUTER_API_KEY is required. Please set it in your .env file."
             )
         return v.strip()
-
-    def get_data_nl_path(self) -> Path:
-        """Get absolute path to Norwegian laws directory."""
-        return Path(self.data_nl_path).resolve()
-
-    def get_data_sf_path(self) -> Path:
-        """Get absolute path to regulations directory."""
-        return Path(self.data_sf_path).resolve()
 
 
 # Singleton instance

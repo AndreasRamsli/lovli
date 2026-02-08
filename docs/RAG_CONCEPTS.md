@@ -28,18 +28,18 @@ A simple single-pass RAG pipeline (embed question -> find similar documents -> g
 
 To address these limitations, Lovli uses a multi-stage retrieval pipeline where each stage progressively narrows the search.
 
-### Stage 1: Query Analysis
+### Stage 1: Query Analysis (Implemented)
 Before any retrieval, the LLM analyzes the user's question:
 - **Query type classification**: Is this a direct section lookup ("What does § 3-5 say?"), a legal question ("Can my landlord evict me?"), or a concept explanation ("What is a deposit?")?
 - **Entity extraction**: Detect explicit law/section references, legal domains, and key concepts.
 - **Follow-up rewriting**: If this is a follow-up in a conversation, rewrite it to be self-contained (e.g., "What's the deadline for that?" -> "What's the deadline for rent increases under husleieloven?").
 
-### Stage 2: Law Routing
-For questions where the relevant law isn't obvious, the system consults a **law catalog** — a compact summary of all 735 Norwegian laws — to identify 1-3 candidate laws. This is a single LLM call against a structured index, not a vector search.
+### Stage 2: Law Routing (In Progress)
+For questions where the relevant law isn't obvious, the system consults a **law catalog** — a compact summary of all 735 Norwegian laws — to identify 1-3 candidate laws. This is a single LLM call against a structured index, not a vector search. [DONE: Catalog generation implemented]
 
 For questions with obvious routing (user mentioned "husleie", or asked about a specific section), this stage is skipped.
 
-### Stage 3: Hybrid Search
+### Stage 3: Hybrid Search (Implemented)
 Search the article-level index using both:
 - **Dense vectors** (BGE-M3): Captures semantic meaning.
 - **Sparse vectors** (BM25-style): Captures exact keyword matches, critical for section numbers and legal terms.
@@ -48,15 +48,15 @@ Results are filtered by metadata to the candidate laws from Stage 2, reducing no
 
 We intentionally **over-retrieve** (k=15) to give the reranker more candidates to work with.
 
-### Stage 4: Reranking
+### Stage 4: Reranking (Implemented)
 A **cross-encoder reranker** (bge-reranker-v2-m3) rescores all 15 candidates by examining each one alongside the original question. Unlike embedding similarity (which compares vectors independently), a cross-encoder sees the query and document together, producing much more accurate relevance scores.
 
 The top 5 after reranking go to generation.
 
-### Stage 5: Cross-Reference Expansion
-Norwegian law sections frequently reference other sections (e.g., "jf. § 9-10"). If the top results contain cross-references, the system fetches those referenced articles as additional context. This handles the common legal pattern where the answer spans multiple connected sections.
+### Stage 5: Cross-Reference Expansion (Planned)
+Norwegian law sections frequently reference other sections (e.g., "jf. § 9-10"). If the top results contain cross-references, the system fetches those referenced articles as additional context. [DONE: Cross-reference parsing implemented]
 
-### Stage 6: Answer Generation
+### Stage 6: Answer Generation (Implemented)
 The LLM generates an answer using the retrieved context with:
 - **Inline citations**: Every claim references a specific section (e.g., "husleieloven § 3-5").
 - **Confidence gating**: If retrieval scores are low, the system says "I couldn't find a clear answer" rather than guessing.

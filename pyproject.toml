@@ -33,13 +33,21 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "pydantic-settings>=2.1.0",
     "pydantic>=2.5.0",
+    "langsmith>=0.3.11",
+    "openevals",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
     "black>=23.12.0",
     "ruff>=0.1.0",
+]
+test = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "scipy>=1.11.0",  # For sparse vector format tests
 ]
 
 [build-system]

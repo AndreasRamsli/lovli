@@ -10,50 +10,28 @@ Lovli helps private users find information about Norwegian laws using natural la
 
 ## Features
 
-- Natural language queries about Norwegian laws
-- Multi-stage retrieval: query analysis -> law routing -> hybrid search -> reranking
-- Hybrid search combining semantic (dense) and keyword (sparse) matching
-- Answers with inline source citations and Lovdata links
-- Real-time streaming responses
-- Streamlit-based chat interface
-- Evaluation via LangSmith with LLM-as-judge
-
-## Architecture
-
-```
-User Question
-    |
-    v
-Query Analysis (classify, rewrite, extract refs)
-    |
-    v
-Law Routing (identify relevant laws from catalog)
-    |
-    v
-Hybrid Search (dense + sparse vectors, metadata-filtered)
-    |
-    v
-Reranking (cross-encoder rescoring)
-    |
-    v
-Answer Generation (streaming, inline citations)
-```
-
-See [docs/RAG_CONCEPTS.md](docs/RAG_CONCEPTS.md) for a detailed explanation of each stage.
+- **Natural language queries** about Norwegian laws
+- **Multi-stage retrieval**: query analysis -> hybrid search -> reranking -> generation
+- **Hybrid search** combining semantic (dense) and keyword (sparse) matching using BGE-M3
+- **Cross-encoder reranking** using `bge-reranker-v2-m3` for high precision
+- **Hierarchical parsing**: extracts Law -> Chapter -> Section structure
+- **Cross-reference extraction**: captures links between different laws
+- **Confidence gating**: avoids low-confidence answers when retrieval is weak
+- **Conversation-aware**: rewrites follow-up questions using chat history
+- **Streamlit-based chat interface** with inline citations and source links
+- **Evaluation via LangSmith** with LLM-as-judge metrics
 
 ## Tech Stack
 
 - **Python 3.11+**
-- **LangChain / LangGraph** - RAG orchestration and multi-step pipeline
+- **LangChain** - RAG orchestration
 - **LangSmith** - Evaluation and observability
-- **Qdrant** - Vector database with hybrid search (dense + sparse)
+- **Qdrant** - Vector database with hybrid search support
 - **BGE-M3** - Multilingual embeddings (dense + sparse)
 - **bge-reranker-v2-m3** - Cross-encoder reranker
-- **GLM-4 / Any LLM** - Via OpenRouter API (supports 100+ models)
+- **GLM-4 / Any LLM** - Via OpenRouter API
 - **Streamlit** - Web UI
-- **BeautifulSoup4** - HTML parsing
-
-See [docs/TECH_STACK.md](docs/TECH_STACK.md) for detailed architecture decisions.
+- **BeautifulSoup4** - HTML parsing with hierarchical extraction
 
 ## Setup
 
@@ -88,108 +66,69 @@ See [docs/TECH_STACK.md](docs/TECH_STACK.md) for detailed architecture decisions
    # Edit .env and add your API keys
    ```
 
-5. **Set up Qdrant** (choose one):
+### Data Preparation & Indexing
+
+Lovli requires legal data from Lovdata's bulk downloads.
+
+1. **Download data**:
+   - Download `gjeldende-lover.tar.bz2` from Lovdata.
+   - Extract to `data/nl/`.
+
+2. **Build the law catalog** (Tier 0):
+   ```bash
+   # Scans all laws and generates LLM summaries (requires API key)
+   python scripts/build_catalog.py data/nl/
+   ```
+
+3. **Index legal documents**:
+   ```bash
+   # Index a specific law (e.g., Husleieloven)
+   python scripts/index_laws.py data/nl/nl-19990326-017.xml --recreate
    
-   **Option A: Qdrant Cloud**
-   - Sign up at https://cloud.qdrant.io/
-   - Create a cluster and get your URL and API key
-   - Add to `.env`:
-     ```
-     QDRANT_URL=https://your-cluster.qdrant.io
-     QDRANT_API_KEY=your_api_key
-     ```
-
-   **Option B: Local Docker**
-   ```bash
-   docker run -p 6333:6333 qdrant/qdrant
-   ```
-   - Use `QDRANT_URL=http://localhost:6333` in `.env`
-
-6. **Index legal documents**:
-   ```bash
-   python -m src.lovli.indexer  # (Script to be created)
+   # Index all laws in the directory
+   python scripts/index_laws.py data/nl/
    ```
 
-7. **Run the Streamlit app**:
-   ```bash
-   streamlit run app.py
-   ```
+### Running the Application
+
+```bash
+streamlit run app.py
+```
 
 ## Project Structure
 
 ```
 lovli/
-├── data/                    # Raw HTML files from Lovdata (gitignored)
-│   ├── nl/                  # Norwegian laws
-│   └── sf/                  # Regulations
-├── docs/                    # Documentation
-│   ├── PROJECT_ROADMAP.md   # Development roadmap and milestones
-│   ├── TECH_STACK.md        # Architecture and technology choices
-│   └── RAG_CONCEPTS.md      # Retrieval pipeline concepts explained
+├── data/                    # Raw HTML files and generated catalog
+├── docs/                    # Detailed documentation
 ├── eval/                    # Evaluation datasets and results
-├── scripts/                 # Utility scripts (eval, dataset upload)
+├── scripts/                 # CLI tools for indexing, cataloging, and eval
+│   ├── index_laws.py        # Index laws into Qdrant
+│   ├── build_catalog.py     # Generate law catalog with summaries
+│   ├── eval_langsmith.py    # Run LangSmith evaluations
+│   └── upload_dataset.py    # Upload eval questions to LangSmith
 ├── src/
 │   └── lovli/
-│       ├── __init__.py
-│       ├── config.py        # Settings and configuration
-│       ├── parser.py        # HTML parsing logic
-│       ├── indexer.py       # Vector indexing
-│       └── chain.py         # RAG pipeline
+│       ├── parser.py        # Hierarchical HTML parsing
+│       ├── indexer.py       # Vector indexing (dense + sparse)
+│       ├── chain.py         # Multi-stage RAG pipeline
+│       ├── catalog.py       # Catalog generation logic
+│       ├── config.py        # Pydantic settings
+│       └── utils.py         # Shared utilities
+├── tests/                   # Unit and integration tests
 ├── app.py                   # Streamlit entry point
-├── pyproject.toml           # Project metadata and dependencies
-├── .env.example             # Template for API keys
+├── pyproject.toml           # Dependencies
 └── README.md
-```
-
-## Usage
-
-1. Start the Streamlit app: `streamlit run app.py`
-2. Open your browser to the URL shown (typically http://localhost:8501)
-3. Ask questions about Norwegian law in natural language
-4. Review answers and check source citations
-
-## Data Sources
-
-- **Lovdata**: Norwegian legal data under NLOD 2.0 license
-- Bulk downloads: `gjeldende-lover.tar.bz2` (laws) and `gjeldende-sentrale-forskrifter.tar.bz2` (regulations)
-- Data files should be placed in `data/nl/` (laws) and `data/sf/` (regulations)
-
-## Development
-
-### Running Tests
-
-```bash
-pytest
-```
-
-### Code Formatting
-
-```bash
-black src/
-ruff check src/
 ```
 
 ## Evaluation
 
-We use **LangSmith** for comprehensive evaluation with experiment tracking and LLM-as-judge evaluation across each pipeline stage.
+We use **LangSmith** for comprehensive evaluation. Results are tracked with metrics for retrieval relevance, citation accuracy, correctness, and groundedness.
 
 ```bash
-# One-time: upload dataset to LangSmith
-python scripts/upload_dataset.py
-
 # Run evaluation experiment
 python scripts/eval_langsmith.py
 ```
-
-Results are tracked in LangSmith with detailed metrics and experiment comparison.
-
-## Roadmap
-
-See [docs/PROJECT_ROADMAP.md](docs/PROJECT_ROADMAP.md) for the full development roadmap, covering:
-- Phase 4: Retrieval quality (hybrid search, reranking, confidence gating)
-- Phase 5: Extended parser and data enrichment
-- Phase 6: Multi-stage retrieval pipeline with three-tier indexing
-- Phase 7: Full-corpus validation and deployment
 
 ## License
 
@@ -199,4 +138,4 @@ MIT License
 
 - Lovdata for providing free access to legal data under NLOD 2.0
 - OpenRouter for unified LLM API access
-- BAAI for BGE-M3 embeddings and bge-reranker-v2-m3
+- BAAI for BGE-M3 and bge-reranker models

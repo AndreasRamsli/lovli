@@ -13,3 +13,23 @@
 {"id": "q013", "question": "Kan jeg fremleie leiligheten min?", "expected_articles": ["kapittel-7-paragraf-2", "kapittel-7-paragraf-3", "kapittel-7-paragraf-4"], "notes": "Krever godkjenning, men godkjenning kan bare nektes ved saklig grunn i visse tilfeller."}
 {"id": "q014", "question": "Hva kan leier kreve hvis leiligheten har mangel?", "expected_articles": ["kapittel-2-paragraf-10", "kapittel-2-paragraf-2"], "notes": "Leier kan kreve retting (§ 2-10). Mangel foreligger hvis husrommet ikke er i vanlig god stand (§ 2-2)."}
 {"id": "q015", "question": "Er en tidsbestemt leieavtale på 1 år lovlig?", "expected_articles": ["kapittel-9-paragraf-3"], "notes": "Hovedregelen er minst 3 år, unntak for loftsbolig/sokkelbolig (1 år) eller saklig grunn."}
+{"id": "q016", "question": "Hva sier § 3-5 om depositum?", "expected_articles": ["kapittel-3-paragraf-5"], "notes": "Direct section lookup - tests exact matching capability."}
+{"id": "q017", "question": "Kan utleier kreve ekstra depositum hvis leier har hund?", "expected_articles": ["kapittel-3-paragraf-5", "kapittel-5-paragraf-2"], "notes": "Multi-section answer combining depositum rules and pet regulations."}
+{"id": "q018", "question": "Hva er forskjellen mellom oppsigelse og heving?", "expected_articles": ["kapittel-9-paragraf-7", "kapittel-9-paragraf-10"], "notes": "Conceptual question requiring multiple sections to explain distinction."}
+{"id": "q019", "question": "Hva skjer hvis utleier ikke varsler før tilsyn?", "expected_articles": ["kapittel-5-paragraf-6"], "notes": "Edge case: violation of notification requirement."}
+{"id": "q020", "question": "Kan leier kreve erstatning hvis leiligheten har vannskade?", "expected_articles": ["kapittel-2-paragraf-10", "kapittel-2-paragraf-13"], "notes": "Multi-section: mangel + erstatning."}
+{"id": "q021", "question": "Hva er reglene?", "expected_articles": [], "notes": "Ambiguous query - should trigger clarifying question."}
+{"id": "q022", "question": "Hva kan jeg gjøre?", "expected_articles": [], "notes": "Ambiguous query - should trigger clarifying question."}
+{"id": "q023", "question": "Hva er fristen for å varsle om husleieøkning?", "expected_articles": ["kapittel-4-paragraf-2"], "notes": "Specific timing question."}
+{"id": "q024", "question": "Kan utleier nekte fremleie uten grunn?", "expected_articles": ["kapittel-7-paragraf-3", "kapittel-7-paragraf-4"], "notes": "Multi-section: fremleie rules with negation."}
+{"id": "q025", "question": "Hva er minimum oppsigelsestid for leietaker?", "expected_articles": ["kapittel-9-paragraf-7"], "notes": "Specific timing question from tenant perspective."}
+{"id": "q026", "question": "Må leier betale for vedlikehold av fellesarealer?", "expected_articles": ["kapittel-5-paragraf-3"], "notes": "Edge case: distinguishing tenant vs landlord maintenance."}
+{"id": "q027", "question": "Hva skjer med depositumet ved oppsigelse?", "expected_articles": ["kapittel-3-paragraf-5", "kapittel-10-paragraf-2"], "notes": "Multi-section: depositum + tilbakelevering."}
+{"id": "q028", "question": "Kan utleier kreve leie for måneder etter oppsigelse?", "expected_articles": ["kapittel-9-paragraf-7", "kapittel-3-paragraf-2"], "notes": "Complex scenario combining oppsigelse and payment."}
+{"id": "q029", "question": "Hva er unntakene fra 3-årsregelen for tidsbestemt leie?", "expected_articles": ["kapittel-9-paragraf-3"], "notes": "Edge case: exceptions to main rule."}
+{"id": "q030", "question": "Hva kan leier gjøre hvis utleier ikke fikser mangel?", "expected_articles": ["kapittel-2-paragraf-10", "kapittel-2-paragraf-11", "kapittel-2-paragraf-12"], "notes": "Multi-section: remedies for unresolved mangel."}
+{"id": "q031", "question": "Er det lovlig?", "expected_articles": [], "notes": "Ambiguous query - should trigger clarifying question."}
+{"id": "q032", "question": "Hva er oppsigelsesfristen for utleier?", "expected_articles": ["kapittel-9-paragraf-7"], "notes": "Specific question about landlord's notice period."}
+{"id": "q033", "question": "Kan leier kreve avslag i leie ved mangel?", "expected_articles": ["kapittel-2-paragraf-10", "kapittel-2-paragraf-11"], "notes": "Multi-section: mangel + price reduction."}
+{"id": "q034", "question": "Hva er forskjellen mellom indeksregulering og annen husleieøkning?", "expected_articles": ["kapittel-4-paragraf-2"], "notes": "Conceptual question requiring explanation of different types."}
+{"id": "q035", "question": "Må utleier gi varsel før oppsigelse?", "expected_articles": ["kapittel-9-paragraf-7"], "notes": "Specific procedural question."}

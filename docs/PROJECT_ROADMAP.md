@@ -40,41 +40,41 @@ users reason through Norwegian law by grounding every response in sources.
 - [x] Implement real-time streaming responses.
 - [x] Migrate evaluations to LangSmith with LLM-as-judge.
 
-## Phase 3: Frontend MVP (In Progress)
+## Phase 3: Frontend MVP (Complete)
 - [x] Build Streamlit chat interface.
 - [x] Display relevant law text inline in the conversation.
-- [ ] Link to Lovdata for source verification.
-- [ ] Ask clarifying questions before answering ambiguous queries.
-- [ ] Implement "Suggested Questions" based on common legal issues.
+- [x] Link to Lovdata for source verification.
+- [x] Ask clarifying questions before answering ambiguous queries.
+- [x] Implement "Suggested Questions" based on common legal issues.
 
-## Phase 4: Retrieval Quality (Next)
+## Phase 4: Retrieval Quality (Complete)
 Improve retrieval precision before scaling to more laws.
-- [ ] **Hybrid search**: Add sparse vectors (BM25) alongside dense embeddings in Qdrant using BGE-M3's built-in sparse encoder. Catches exact section references (e.g., "§ 3-5") that pure semantic search misses.
-- [ ] **Cross-encoder reranker**: Over-retrieve (k=15), then rerank with `bge-reranker-v2-m3` to select the top 5 by actual relevance. Drop-in improvement, measurable via LangSmith.
-- [ ] **Confidence gating**: When reranker scores are low, respond with "Jeg fant ikke et klart svar" instead of guessing. Ask for clarification when retrieval is weak.
-- [ ] **Conversation-aware retrieval**: Rewrite follow-up questions using chat history before retrieval (e.g., "Hva er fristen for det?" -> "Hva er fristen for husleieokening?").
-- [ ] Expand eval set to 30+ questions covering edge cases and multi-section answers.
+- [x] **Hybrid search**: Add sparse vectors (BM25) alongside dense embeddings in Qdrant using BGE-M3's built-in sparse encoder. Catches exact section references (e.g., "§ 3-5") that pure semantic search misses.
+- [x] **Cross-encoder reranker**: Over-retrieve (k=15), then rerank with `bge-reranker-v2-m3` to select the top 5 by actual relevance. Drop-in improvement, measurable via LangSmith.
+- [x] **Confidence gating**: When reranker scores are low, respond with "Jeg fant ikke et klart svar" instead of guessing. Ask for clarification when retrieval is weak.
+- [x] **Conversation-aware retrieval**: Rewrite follow-up questions using chat history before retrieval (e.g., "Hva er fristen for det?" -> "Hva er fristen for husleieokening?").
+- [x] Expand eval set to 30+ questions covering edge cases and multi-section answers.
 
-## Phase 5: Extended Parser & Enrichment
+## Phase 5: Extended Parser & Enrichment (Complete)
 Enrich the data layer to support multi-law retrieval and cross-referencing.
-- [ ] **Hierarchical extraction**: Extend parser to capture full structure (Law -> Chapter -> Section -> Subsection) with chapter-level metadata.
-- [ ] **Cross-reference parsing**: Detect and store explicit references between sections (e.g., "jf. forbrukerkjopsloven § 15") as structured metadata.
-- [ ] **Law-level summaries**: Generate a 2-3 sentence LLM summary for each of the 735 laws, describing scope and target audience. This becomes the routing index.
-- [ ] **Metadata-rich payloads**: Store `law_id`, `law_title`, `law_short_name`, `chapter_id`, `chapter_title`, `cross_references`, and `url` on every indexed article.
+- [x] **Hierarchical extraction**: Extend parser to capture full structure (Law -> Chapter -> Section -> Subsection) with chapter-level metadata.
+- [x] **Cross-reference parsing**: Detect and store explicit references between sections (e.g., "jf. forbrukerkjopsloven § 15") as structured metadata.
+- [x] **Law-level summaries**: Generate a 2-3 sentence LLM summary for each of the 735 laws, describing scope and target audience. This becomes the routing index.
+- [x] **Metadata-rich payloads**: Store `law_id`, `law_title`, `law_short_name`, `chapter_id`, `chapter_title`, `cross_references`, and `url` on every indexed article.
 
-## Phase 6: Multi-Stage Retrieval Pipeline
+## Phase 6: Multi-Stage Retrieval Pipeline (Next)
 Build the robust, multi-stage pipeline for full-corpus retrieval.
 
 ### Three-Tier Indexing
-- [ ] **Tier 0 — Law catalog**: Structured table of all 735 laws with summaries. Small enough to fit in a prompt for routing (~50k tokens).
+- [ ] **Tier 0 — Law catalog**: Structured table of all 735 laws with summaries. Small enough to fit in a prompt for routing (~50k tokens). [DONE: Generation implemented]
 - [ ] **Tier 1 — Chapter-level index**: ~3,000-5,000 vectorized chapter summaries for narrowing within a law.
-- [ ] **Tier 2 — Article-level index**: Full article text with hybrid search (dense + sparse) and rich metadata filters.
+- [ ] **Tier 2 — Article-level index**: Full article text with hybrid search (dense + sparse) and rich metadata filters. [DONE: Husleieloven indexed]
 
 ### Retrieval Stages
-- [ ] **Query analysis**: Classify query type (section lookup, legal question, concept explanation), extract explicit references, detect legal domain, rewrite follow-ups.
+- [x] **Query analysis**: Classify query type (section lookup, legal question, concept explanation), extract explicit references, detect legal domain, rewrite follow-ups.
 - [ ] **Law routing**: For broad questions, use LLM + law catalog to identify 1-3 candidate laws before retrieval.
-- [ ] **Filtered hybrid search**: Search article index filtered to candidate laws, combining semantic and keyword matching.
-- [ ] **Reranking**: Cross-encoder rescoring of candidates.
+- [x] **Filtered hybrid search**: Search article index filtered to candidate laws, combining semantic and keyword matching.
+- [x] **Reranking**: Cross-encoder rescoring of candidates.
 - [ ] **Cross-reference expansion**: Automatically fetch articles referenced by the top results (e.g., "jf. § 9-10").
 - [ ] Migrate pipeline orchestration from `create_retrieval_chain` to **LangGraph** for multi-step control flow.
 
