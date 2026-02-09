@@ -70,28 +70,44 @@ class LegalIndexer:
             logger.error(f"Failed to connect to Qdrant: {e}")
             raise ConnectionError(f"Cannot connect to Qdrant: {e}") from e
 
-        try:
-            logger.info(f"Loading embedding model: {self.settings.embedding_model_name}")
-            self.embedding_model = SentenceTransformer(
-                self.settings.embedding_model_name
-            )
-            logger.info("Embedding model loaded successfully")
-        except Exception as e:
-            logger.error(f"Failed to load embedding model: {e}")
-            raise ValueError(f"Cannot load embedding model: {e}") from e
-
-        # Detect BGE-M3 and native API availability once
+        # Detect BGE-M3 model
         self._is_bge_m3 = "bge-m3" in self.settings.embedding_model_name.lower()
         self._use_native_api = False
+        self._flag_model = None
+
+        # Try to load BGEM3FlagModel for native dense+sparse support
         if self._is_bge_m3:
             try:
-                from FlagEmbedding import FlagModel
-                # Check if we can access the underlying FlagModel
-                if hasattr(self.embedding_model, 'model') and isinstance(self.embedding_model.model, FlagModel):
-                    self._use_native_api = True
-                    logger.info("BGE-M3 native API detected and will be used")
+                from FlagEmbedding import BGEM3FlagModel
+
+                logger.info(f"Loading BGE-M3 via FlagEmbedding (native API): {self.settings.embedding_model_name}")
+                self._flag_model = BGEM3FlagModel(
+                    self.settings.embedding_model_name,
+                    use_fp16=True,
+                )
+                self._use_native_api = True
+                logger.info("BGE-M3 loaded with native API (dense + sparse support)")
             except ImportError:
-                pass
+                logger.info("FlagEmbedding not installed, falling back to SentenceTransformer (dense-only)")
+            except Exception as e:
+                logger.warning(f"Failed to load BGEM3FlagModel: {e}. Falling back to SentenceTransformer.")
+
+        # Fall back to SentenceTransformer for dense-only encoding
+        if not self._use_native_api:
+            try:
+                logger.info(f"Loading embedding model: {self.settings.embedding_model_name}")
+                self.embedding_model = SentenceTransformer(
+                    self.settings.embedding_model_name
+                )
+                logger.info("Embedding model loaded successfully (dense-only)")
+            except Exception as e:
+                logger.error(f"Failed to load embedding model: {e}")
+                raise ValueError(f"Cannot load embedding model: {e}") from e
+        else:
+            self.embedding_model = None  # Not needed when using native API
+
+        # Track actual sparse support based on what we loaded
+        self._has_sparse = self._use_native_api
 
     def collection_exists(self, collection_name: str | None = None) -> bool:
         """
@@ -134,10 +150,8 @@ class LegalIndexer:
                 return
 
         logger.info(f"Creating collection: {name}")
-        
-        is_bge_m3 = "bge-m3" in self.settings.embedding_model_name.lower()
-        
-        if is_bge_m3:
+
+        if self._has_sparse:
             # Use named dense vector + named sparse vector for hybrid search.
             # Named vectors are required when combining dense and sparse in Qdrant.
             vectors_config = {"dense": VectorParams(
@@ -228,10 +242,9 @@ class LegalIndexer:
         for start in range(0, len(texts), self.settings.embedding_batch_size):
             chunk = texts[start : start + self.settings.embedding_batch_size]
             try:
-                if self._use_native_api and self._is_bge_m3:
-                    # Use BGE-M3's native API for sparse vectors
-                    flag_model = self.embedding_model.model
-                    result = flag_model.encode(
+                if self._use_native_api and self._flag_model is not None:
+                    # Use BGEM3FlagModel native API for dense + sparse vectors
+                    result = self._flag_model.encode(
                         chunk,
                         return_dense=True,
                         return_sparse=True,
@@ -243,32 +256,8 @@ class LegalIndexer:
                         sparse_embeddings.extend(result.get("lexical_weights", []))
                     else:
                         dense_embeddings.extend(result)
-                elif self._is_bge_m3:
-                    # Try sentence-transformers wrapper with return_sparse
-                    # Note: This may not work with all sentence-transformers versions
-                    try:
-                        result = self.embedding_model.encode(
-                            chunk,
-                            return_sparse=True,
-                            show_progress_bar=False
-                        )
-                        if isinstance(result, dict):
-                            dense_embeddings.extend(result.get("dense", result.get("dense_vecs", [])))
-                            sparse_embeddings.extend(result.get("sparse", result.get("lexical_weights", [])))
-                        elif isinstance(result, tuple) and len(result) >= 2:
-                            dense_embeddings.extend(result[0])
-                            sparse_embeddings.extend(result[1])
-                        else:
-                            dense_embeddings.extend(result)
-                    except (TypeError, AttributeError):
-                        # Fallback to dense-only if sparse not supported
-                        logger.warning("Sparse vectors not available, using dense-only")
-                        chunk_embeddings = self.embedding_model.encode(
-                            chunk, show_progress_bar=False
-                        )
-                        dense_embeddings.extend(chunk_embeddings)
                 else:
-                    # Standard dense-only encoding
+                    # SentenceTransformer: dense-only encoding
                     chunk_embeddings = self.embedding_model.encode(
                         chunk, show_progress_bar=False
                     )
@@ -277,64 +266,27 @@ class LegalIndexer:
                 logger.error(f"Failed to generate embeddings for batch chunk: {e}")
                 raise RuntimeError(f"Embedding generation failed: {e}") from e
 
-        # Store in QdrantVectorStore-compatible format:
-        # - page_content: document text (for retrieval)
-        # - metadata: nested dict with article info (for citations)
+        # Build Qdrant points
         points = []
         for idx, article in enumerate(batch):
             point_id = _generate_deterministic_id(article.article_id)
             dense_vector = dense_embeddings[idx].tolist() if idx < len(dense_embeddings) else None
-            
-            # Prepare sparse vector if available
+
+            # Prepare sparse vector if available (only with native API)
             sparse_vector = None
-            if is_bge_m3 and idx < len(sparse_embeddings):
+            if self._has_sparse and idx < len(sparse_embeddings):
                 sparse_vec = sparse_embeddings[idx]
-                # Convert sparse vector to Qdrant format: dict with indices and values
-                if isinstance(sparse_vec, dict):
-                    # Already in dict format (from FlagEmbedding)
-                    if "indices" in sparse_vec and "values" in sparse_vec:
-                        sparse_vector = {
-                            "indices": list(sparse_vec["indices"]),
-                            "values": list(sparse_vec["values"]),
-                        }
-                    elif "token_spans" in sparse_vec:
-                        # Convert token_spans format to indices/values
-                        indices = []
-                        values = []
-                        for token_id, weight in sparse_vec.get("token_spans", {}).items():
-                            indices.append(int(token_id))
-                            values.append(float(weight))
-                        if indices and values and len(indices) == len(values):
-                            sparse_vector = {"indices": indices, "values": values}
-                        else:
-                            logger.warning(f"Invalid token_spans format for article {article.article_id}, skipping sparse vector")
-                elif hasattr(sparse_vec, 'indices') and hasattr(sparse_vec, 'values'):
-                    # Scipy sparse format
-                    sparse_vector = {
-                        "indices": sparse_vec.indices.tolist() if hasattr(sparse_vec.indices, 'tolist') else list(sparse_vec.indices),
-                        "values": sparse_vec.values.tolist() if hasattr(sparse_vec.values, 'tolist') else list(sparse_vec.values),
-                    }
-                elif isinstance(sparse_vec, (list, tuple)) and len(sparse_vec) == 2:
-                    # Tuple/list format (indices, values)
-                    sparse_vector = {
-                        "indices": list(sparse_vec[0]),
-                        "values": list(sparse_vec[1]),
-                    }
-            
-            # Qdrant named vectors format:
-            # - If sparse vectors are configured, use named vectors: {"dense": [...], "sparse": {...}}
-            # - Otherwise, use default vector format (just the dense vector)
-            # Note: QdrantVectorStore expects default vector, so we use named vectors only when sparse is available
-            if sparse_vector and is_bge_m3:
-                # Use named vectors format for hybrid search
+                sparse_vector = self._convert_sparse_vector(sparse_vec, article.article_id)
+
+            # Use named vectors for hybrid search, or default vector for dense-only
+            if sparse_vector and self._has_sparse:
                 vectors = {
                     "dense": dense_vector,
                     "sparse": sparse_vector,
                 }
             else:
-                # Default vector format (dense-only, compatible with QdrantVectorStore)
                 vectors = dense_vector
-            
+
             point = PointStruct(
                 id=point_id,
                 vector=vectors,
@@ -360,3 +312,34 @@ class LegalIndexer:
             points=points,
         )
         return len(points)
+
+    @staticmethod
+    def _convert_sparse_vector(sparse_vec, article_id: str) -> dict | None:
+        """Convert a sparse vector from various formats to Qdrant's {indices, values} format."""
+        if isinstance(sparse_vec, dict):
+            if "indices" in sparse_vec and "values" in sparse_vec:
+                return {
+                    "indices": list(sparse_vec["indices"]),
+                    "values": list(sparse_vec["values"]),
+                }
+            # FlagEmbedding lexical_weights format: {token_id: weight, ...}
+            indices = list(sparse_vec.keys())
+            values = list(sparse_vec.values())
+            if indices and values:
+                return {
+                    "indices": [int(i) for i in indices],
+                    "values": [float(v) for v in values],
+                }
+        elif hasattr(sparse_vec, "indices") and hasattr(sparse_vec, "values"):
+            # Scipy sparse format
+            return {
+                "indices": sparse_vec.indices.tolist() if hasattr(sparse_vec.indices, "tolist") else list(sparse_vec.indices),
+                "values": sparse_vec.values.tolist() if hasattr(sparse_vec.values, "tolist") else list(sparse_vec.values),
+            }
+        elif isinstance(sparse_vec, (list, tuple)) and len(sparse_vec) == 2:
+            return {
+                "indices": list(sparse_vec[0]),
+                "values": list(sparse_vec[1]),
+            }
+        logger.warning(f"Unrecognized sparse vector format for article {article_id}, skipping")
+        return None

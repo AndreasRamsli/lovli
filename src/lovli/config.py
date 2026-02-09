@@ -89,7 +89,8 @@ class Settings(BaseSettings):
         default=0.3,
         ge=0.0,
         le=1.0,
-        description="Minimum reranker score threshold for confidence gating",
+        description="Minimum sigmoid-normalized reranker score [0, 1] for confidence gating. "
+        "Documents below this threshold trigger a 'no confident answer' response.",
     )
 
     # Indexing Configuration

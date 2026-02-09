@@ -52,13 +52,15 @@ Improve retrieval precision before scaling to more laws.
 - [x] **Hybrid search**: Add sparse vectors (BM25) alongside dense embeddings in Qdrant using BGE-M3's built-in sparse encoder. Catches exact section references (e.g., "§ 3-5") that pure semantic search misses.
 - [x] **Cross-encoder reranker**: Over-retrieve (k=15), then rerank with `bge-reranker-v2-m3` to select the top 5 by actual relevance. Drop-in improvement, measurable via LangSmith.
 - [x] **Confidence gating**: When reranker scores are low, respond with "Jeg fant ikke et klart svar" instead of guessing. Ask for clarification when retrieval is weak.
-- [x] **Conversation-aware retrieval**: Rewrite follow-up questions using chat history before retrieval (e.g., "Hva er fristen for det?" -> "Hva er fristen for husleieokening?").
+- [x] **Conversation-aware retrieval**: Rewrite follow-up questions using chat history before retrieval (e.g., "Hva er fristen for det?" -> "Hva er fristen for husleieøkning?").
+- [x] **Deduplication**: Implemented document deduplication before reranking to improve efficiency and result quality.
+- [x] **Multilingual support**: Optimized for Norwegian legal text using BGE-M3 and specific Lovdata parsing rules.
 - [x] Expand eval set to 30+ questions covering edge cases and multi-section answers.
 
 ## Phase 5: Extended Parser & Enrichment (Complete)
 Enrich the data layer to support multi-law retrieval and cross-referencing.
 - [x] **Hierarchical extraction**: Extend parser to capture full structure (Law -> Chapter -> Section -> Subsection) with chapter-level metadata.
-- [x] **Cross-reference parsing**: Detect and store explicit references between sections (e.g., "jf. forbrukerkjopsloven § 15") as structured metadata.
+- [x] **Cross-reference parsing**: Detect and store explicit references between sections (e.g., "jf. forbrukerkjøpsloven § 15") as structured metadata.
 - [x] **Law-level summaries**: Generate a 2-3 sentence LLM summary for each of the 735 laws, describing scope and target audience. This becomes the routing index.
 - [x] **Metadata-rich payloads**: Store `law_id`, `law_title`, `law_short_name`, `chapter_id`, `chapter_title`, `cross_references`, and `url` on every indexed article.
 

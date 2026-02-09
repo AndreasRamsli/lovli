@@ -34,18 +34,29 @@ def _extract_law_ref_from_filename(filename: str) -> str:
     """
     Extract Lovdata reference from filename.
 
-    Example: nl-19990326-017 -> lov/1999-03-26-17
+    Examples:
+        nl-19990326-017 -> lov/1999-03-26-017
+        sf-19970606-032 -> forskrift/1997-06-06-032
     """
-    # Format: nl-YYYYMMDD-NNN
+    # Format: nl-YYYYMMDD-NNN or sf-YYYYMMDD-NNN
     parts = filename.split("-")
     if len(parts) >= 3:
+        prefix = parts[0]  # "nl" or "sf"
         date_part = parts[1]  # YYYYMMDD
         num_part = parts[2]   # NNN
         if len(date_part) == 8:
             year = date_part[:4]
             month = date_part[4:6]
             day = date_part[6:8]
-            return f"lov/{year}-{month}-{day}-{num_part}"
+            # Map prefix to Lovdata URL prefix
+            if prefix == "sf":
+                ref_prefix = "forskrift"
+            elif prefix == "nl":
+                ref_prefix = "lov"
+            else:
+                # Unknown prefix, default to lov
+                ref_prefix = "lov"
+            return f"{ref_prefix}/{year}-{month}-{day}-{num_part}"
     return filename
 
 
@@ -353,9 +364,15 @@ def parse_law_header(xml_path: Path) -> dict:
 
     # Count chapters and articles using fast regex on raw content
     chapter_count = len(re.findall(r'<section[^>]+id="kapittel-\d+[a-zA-Z]?"', content))
-    article_count = len(re.findall(
-        r'<article[^>]+id="kapittel-\d+[a-zA-Z]?-paragraf-\d+[a-zA-Z]?"', content
-    ))
+    
+    # Count articles: match all <article> tags and extract IDs, excluding sub-articles
+    # This matches both hierarchical (kapittel-X-paragraf-Y) and flat structure articles
+    # Exclude -ledd- and -punkt- sub-articles (same logic as _extract_article)
+    all_article_matches = re.findall(r'<article[^>]+id="([^"]+)"', content)
+    article_count = sum(
+        1 for art_id in all_article_matches
+        if "-ledd-" not in art_id and "-punkt-" not in art_id
+    )
 
     return {
         "law_id": law_id,

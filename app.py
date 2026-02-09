@@ -4,7 +4,7 @@ import logging
 import sys
 import streamlit as st
 from lovli.config import get_settings
-from lovli.chain import LegalRAGChain
+from lovli.chain import LegalRAGChain, NO_RESULTS_RESPONSE
 from lovli.utils import extract_chat_history
 
 # Configure logging
@@ -193,7 +193,7 @@ if prompt:
 
             # Step 2: Stream answer
             if not sources:
-                answer = "Beklager, jeg kunne ikke finne informasjon om dette spørsmålet."
+                answer = NO_RESULTS_RESPONSE
                 st.markdown(answer)
                 st.session_state.messages.append({
                     "role": "assistant",
@@ -201,22 +201,32 @@ if prompt:
                     "sources": [],
                 })
             else:
+                # Check if confidence gating will fire before streaming
+                is_gated = rag_chain.should_gate_answer(top_score)
+                
                 # Stream the answer (with confidence gating)
                 answer = st.write_stream(rag_chain.stream_answer(prompt, sources, top_score=top_score))
 
-                with st.expander("📚 Sources"):
-                    for source in sources:
-                        source_text = _format_source(source)
-                        if source.get("url"):
-                            st.markdown(f"{source_text} - [View on Lovdata]({source['url']})")
-                        else:
-                            st.markdown(source_text)
+                # Only show sources if answer wasn't gated (gated responses shouldn't show sources)
+                if not is_gated:
+                    with st.expander("📚 Sources"):
+                        for source in sources:
+                            source_text = _format_source(source)
+                            if source.get("url"):
+                                st.markdown(f"{source_text} - [View on Lovdata]({source['url']})")
+                            else:
+                                st.markdown(source_text)
 
                 # Store sources without content to save memory
-                sources_for_storage = [
-                    {k: v for k, v in s.items() if k != "content"}
-                    for s in sources
-                ]
+                # For gated responses, store empty sources list
+                sources_for_storage = (
+                    []
+                    if is_gated
+                    else [
+                        {k: v for k, v in s.items() if k != "content"}
+                        for s in sources
+                    ]
+                )
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": answer,
