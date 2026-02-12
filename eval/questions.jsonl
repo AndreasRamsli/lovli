@@ -33,3 +33,13 @@
 {"id": "q033", "question": "Kan leier kreve avslag i leie ved mangel?", "expected_articles": ["kapittel-2-paragraf-10", "kapittel-2-paragraf-11"], "notes": "Multi-section: mangel + price reduction."}
 {"id": "q034", "question": "Hva er forskjellen mellom indeksregulering og annen husleieøkning?", "expected_articles": ["kapittel-4-paragraf-2"], "notes": "Conceptual question requiring explanation of different types."}
 {"id": "q035", "question": "Må utleier gi varsel før oppsigelse?", "expected_articles": ["kapittel-9-paragraf-7"], "notes": "Specific procedural question."}
+{"id": "q036", "question": "Hva sier arbeidsmiljøloven om oppsigelse?", "expected_articles": [], "notes": "Out-of-scope for husleieloven-focused retrieval; should avoid confident citations."}
+{"id": "q037", "question": "Hva er promillegrensen i veitrafikkloven?", "expected_articles": [], "notes": "Out-of-scope legal domain; should trigger no-results or clarification."}
+{"id": "q038", "question": "Kan banken kreve depositum ved boliglån?", "expected_articles": [], "notes": "Lexical overlap on 'depositum' but not a tenancy question."}
+{"id": "q039", "question": "Hvilke regler gjelder for oppsigelse av mobilabonnement?", "expected_articles": [], "notes": "Contains 'oppsigelse' but should not retrieve tenancy provisions as top context."}
+{"id": "q040", "question": "Må arbeidsgiver varsle før endring i arbeidstid?", "expected_articles": [], "notes": "Cross-domain labor-law question; should not get husleieloven citations."}
+{"id": "q041", "question": "Hva står i husleieloven § 9-7 om oppsigelsestid?", "expected_articles": ["kapittel-9-paragraf-7"], "notes": "Direct section lookup with explicit law mention."}
+{"id": "q042", "question": "Hvor lang frist har utleier til å varsle indeksregulering etter husleieloven?", "expected_articles": ["kapittel-4-paragraf-2"], "notes": "Term-heavy query to test exact article precision for indeksregulering."}
+{"id": "q043", "question": "Kan utleier ta både depositum og garanti samtidig?", "expected_articles": ["kapittel-3-paragraf-5", "kapittel-3-paragraf-6"], "notes": "Multi-article comparison within same chapter."}
+{"id": "q044", "question": "Hva skjer med depositum hvis leier skylder strømregninger ved utflytting?", "expected_articles": ["kapittel-3-paragraf-5", "kapittel-10-paragraf-2"], "notes": "Scenario question that should combine depositum handling and return conditions."}
+{"id": "q045", "question": "Hvilke regler gjelder for klage på skattevedtak?", "expected_articles": [], "notes": "Out-of-scope tax-law question; should not be answered with tenancy citations."}

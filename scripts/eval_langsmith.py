@@ -70,7 +70,7 @@ def target(inputs: Dict[str, Any]) -> Dict[str, Any]:
     question = inputs["question"]
     
     # Single retrieve call -- returns reranked sources with content
-    sources, top_score = chain.retrieve(question)
+    sources, top_score, scores = chain.retrieve(question)
     
     # Extract cited article IDs
     cited_articles = [s.get("article_id", "unknown") for s in sources]
@@ -82,7 +82,7 @@ def target(inputs: Dict[str, Any]) -> Dict[str, Any]:
     ]
     
     # Generate answer (with confidence gating)
-    if chain.should_gate_answer(top_score):
+    if chain.should_gate_answer(top_score, scores=scores):
         answer = "Jeg fant ikke et klart svar på spørsmålet ditt i lovtekstene. Kunne du prøve å omformulere spørsmålet eller være mer spesifikk?"
     elif not sources:
         answer = "Beklager, jeg kunne ikke finne informasjon om dette spørsmålet."
@@ -97,6 +97,8 @@ def target(inputs: Dict[str, Any]) -> Dict[str, Any]:
         "answer": answer,
         "cited_articles": cited_articles,
         "retrieved_context": context_documents,
+        "is_gated": chain.should_gate_answer(top_score, scores=scores),
+        "reranker_top_score": top_score,
     }
 
 
@@ -196,6 +198,47 @@ def create_citation_match_evaluator(settings: Settings):
     return citation_match_evaluator
 
 
+def create_offtopic_contamination_evaluator():
+    """
+    Evaluate whether ambiguous/off-topic prompts incorrectly return citations.
+
+    For dataset rows with empty expected_articles, we expect either:
+    - gated/no-results behavior, or
+    - no citations.
+    """
+
+    def offtopic_contamination_evaluator(
+        inputs: Dict[str, Any],
+        outputs: Dict[str, Any],
+        reference_outputs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        expected_articles = reference_outputs.get("expected_articles", [])
+        if expected_articles:
+            return {
+                "key": "offtopic_contamination",
+                "score": True,
+                "comment": "Skipped (question has expected article labels).",
+            }
+
+        cited_articles = outputs.get("cited_articles", [])
+        answer = outputs.get("answer", "")
+        is_gated = outputs.get("is_gated", False)
+        no_results = "Beklager, jeg kunne ikke finne informasjon" in answer
+
+        ok = is_gated or no_results or len(cited_articles) == 0
+        return {
+            "key": "offtopic_contamination",
+            "score": ok,
+            "comment": (
+                "No expected articles. "
+                f"is_gated={is_gated}, cited={len(cited_articles)}, "
+                f"no_results={no_results}"
+            ),
+        }
+
+    return offtopic_contamination_evaluator
+
+
 def main():
     """Run LangSmith evaluation."""
     settings = get_settings()
@@ -253,7 +296,10 @@ def main():
     citation_match_evaluator = create_citation_match_evaluator(settings)
     evaluators.append(citation_match_evaluator)
     
-    # 3. Correctness evaluator
+    # 3. Off-topic contamination evaluator (for expected_articles=[])
+    evaluators.append(create_offtopic_contamination_evaluator())
+
+    # 4. Correctness evaluator
     correctness_evaluator = create_llm_as_judge(
         prompt=CORRECTNESS_PROMPT,
         feedback_key="correctness",
@@ -272,7 +318,7 @@ def main():
     
     evaluators.append(wrapped_correctness)
     
-    # 4. Groundedness evaluator
+    # 5. Groundedness evaluator
     groundedness_evaluator = create_llm_as_judge(
         prompt=RAG_GROUNDEDNESS_PROMPT,
         feedback_key="groundedness",
@@ -316,7 +362,13 @@ def main():
         try:
             if hasattr(experiment_results, "results") and experiment_results.results:
                 logger.info("\nSummary Statistics:")
-                evaluator_names = ["retrieval_relevance", "citation_match", "correctness", "groundedness"]
+                evaluator_names = [
+                    "retrieval_relevance",
+                    "citation_match",
+                    "offtopic_contamination",
+                    "correctness",
+                    "groundedness",
+                ]
                 for evaluator_name in evaluator_names:
                     scores = []
                     for r in experiment_results.results:

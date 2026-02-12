@@ -189,7 +189,10 @@ if prompt:
                     window_size=CHAT_HISTORY_WINDOW,
                     exclude_current=True
                 )
-                sources, top_score = rag_chain.retrieve(prompt, chat_history=chat_history)
+                sources, top_score, scores = rag_chain.retrieve(
+                    prompt,
+                    chat_history=chat_history,
+                )
 
             # Step 2: Stream answer
             if not sources:
@@ -202,10 +205,17 @@ if prompt:
                 })
             else:
                 # Check if confidence gating will fire before streaming
-                is_gated = rag_chain.should_gate_answer(top_score)
+                is_gated = rag_chain.should_gate_answer(top_score, scores=scores)
                 
                 # Stream the answer (with confidence gating)
-                answer = st.write_stream(rag_chain.stream_answer(prompt, sources, top_score=top_score))
+                answer = st.write_stream(
+                    rag_chain.stream_answer(
+                        prompt,
+                        sources,
+                        top_score=top_score,
+                        scores=scores,
+                    )
+                )
 
                 # Only show sources if answer wasn't gated (gated responses shouldn't show sources)
                 if not is_gated:

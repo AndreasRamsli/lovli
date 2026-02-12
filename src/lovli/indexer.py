@@ -96,10 +96,13 @@ class LegalIndexer:
         if not self._use_native_api:
             try:
                 logger.info(f"Loading embedding model: {self.settings.embedding_model_name}")
+                # Force CPU to avoid MPS (Apple Silicon GPU) out-of-memory errors
+                # on large batches. CPU is reliable and fast enough for indexing.
                 self.embedding_model = SentenceTransformer(
-                    self.settings.embedding_model_name
+                    self.settings.embedding_model_name,
+                    device="cpu",
                 )
-                logger.info("Embedding model loaded successfully (dense-only)")
+                logger.info("Embedding model loaded successfully (dense-only, CPU)")
             except Exception as e:
                 logger.error(f"Failed to load embedding model: {e}")
                 raise ValueError(f"Cannot load embedding model: {e}") from e
@@ -172,8 +175,9 @@ class LegalIndexer:
             collection_name=name,
             vectors_config=vectors_config,
             sparse_vectors_config=sparse_vectors_config,
+            on_disk_payload=True,  # Store payloads on disk to save RAM
         )
-        logger.info(f"Collection {name} created successfully")
+        logger.info(f"Collection {name} created successfully (payloads on disk)")
 
     def index_articles(self, articles: Iterator[LegalArticle]) -> int:
         """

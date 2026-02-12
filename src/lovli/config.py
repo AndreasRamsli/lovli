@@ -70,7 +70,7 @@ class Settings(BaseSettings):
         description="Number of documents to retrieve for RAG (final count after reranking)",
     )
     retrieval_k_initial: int = Field(
-        default=15,
+        default=20,
         ge=1,
         le=50,
         description="Number of documents to retrieve before reranking (over-retrieve for reranker)",
@@ -86,11 +86,64 @@ class Settings(BaseSettings):
         description="Enable cross-encoder reranking",
     )
     reranker_confidence_threshold: float = Field(
-        default=0.3,
+        default=0.4,
         ge=0.0,
         le=1.0,
         description="Minimum sigmoid-normalized reranker score [0, 1] for confidence gating. "
         "Documents below this threshold trigger a 'no confident answer' response.",
+    )
+    reranker_min_doc_score: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="Minimum per-document reranker score required to keep a document "
+        "in the final context.",
+    )
+    reranker_min_sources: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        description="Minimum number of sources to keep after per-document score filtering.",
+    )
+    reranker_ambiguity_gating_enabled: bool = Field(
+        default=True,
+        description="Enable ambiguity gating when top reranker scores are too close.",
+    )
+    reranker_ambiguity_min_gap: float = Field(
+        default=0.08,
+        ge=0.0,
+        le=1.0,
+        description="Minimum gap between top-1 and top-2 reranker scores to consider "
+        "the result clearly ranked.",
+    )
+    reranker_ambiguity_top_score_ceiling: float = Field(
+        default=0.65,
+        ge=0.0,
+        le=1.0,
+        description="Only apply ambiguity gating when top score is at or below this "
+        "ceiling.",
+    )
+
+    # Optional law routing (Tier 0 catalog)
+    law_routing_enabled: bool = Field(
+        default=False,
+        description="Enable lightweight law routing before retrieval using the law catalog.",
+    )
+    law_catalog_path: str = Field(
+        default="data/law_catalog.json",
+        description="Path to the law catalog JSON used for routing.",
+    )
+    law_routing_max_candidates: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Maximum number of candidate laws to route to before retrieval.",
+    )
+    law_routing_min_token_overlap: int = Field(
+        default=1,
+        ge=1,
+        le=10,
+        description="Minimum token overlap required for a law to be considered a routing candidate.",
     )
 
     # Indexing Configuration
