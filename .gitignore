@@ -66,6 +66,7 @@ qdrant_data/
 
 # Data files (bulk downloaded, can be re-downloaded)
 data/
+notebooks/*.tar.bz2
 
 # Logs
 *.log
