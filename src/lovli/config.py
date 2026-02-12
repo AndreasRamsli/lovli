@@ -70,7 +70,7 @@ class Settings(BaseSettings):
         description="Number of documents to retrieve for RAG (final count after reranking)",
     )
     retrieval_k_initial: int = Field(
-        default=20,
+        default=15,
         ge=1,
         le=50,
         description="Number of documents to retrieve before reranking (over-retrieve for reranker)",
@@ -110,14 +110,14 @@ class Settings(BaseSettings):
         description="Enable ambiguity gating when top reranker scores are too close.",
     )
     reranker_ambiguity_min_gap: float = Field(
-        default=0.08,
+        default=0.05,
         ge=0.0,
         le=1.0,
         description="Minimum gap between top-1 and top-2 reranker scores to consider "
         "the result clearly ranked.",
     )
     reranker_ambiguity_top_score_ceiling: float = Field(
-        default=0.65,
+        default=0.70,
         ge=0.0,
         le=1.0,
         description="Only apply ambiguity gating when top score is at or below this "
