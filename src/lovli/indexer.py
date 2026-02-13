@@ -304,6 +304,8 @@ class LegalIndexer:
                         "law_short_name": article.law_short_name,
                         "chapter_id": article.chapter_id,
                         "chapter_title": article.chapter_title,
+                        "source_anchor_id": article.source_anchor_id,
+                        "doc_type": article.doc_type,
                         "cross_references": article.cross_references or [],
                         "url": article.url,
                     },

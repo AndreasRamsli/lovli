@@ -64,7 +64,7 @@ def target(inputs: Dict[str, Any]) -> Dict[str, Any]:
         inputs: Dictionary with 'question' key
         
     Returns:
-        Dictionary with 'answer', 'cited_articles', and 'retrieved_context'
+        Dictionary with answer, cited article IDs, cited source tuples, and context.
     """
     chain = get_chain()
     question = inputs["question"]
@@ -74,6 +74,14 @@ def target(inputs: Dict[str, Any]) -> Dict[str, Any]:
     
     # Extract cited article IDs
     cited_articles = [s.get("article_id", "unknown") for s in sources]
+    cited_sources = [
+        {
+            "law_id": s.get("law_id", "unknown"),
+            "article_id": s.get("article_id", "unknown"),
+            "doc_type": s.get("doc_type", "provision"),
+        }
+        for s in sources
+    ]
     
     # Format context as a list of document strings for evaluators
     context_documents = [
@@ -96,6 +104,7 @@ def target(inputs: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "answer": answer,
         "cited_articles": cited_articles,
+        "cited_sources": cited_sources,
         "retrieved_context": context_documents,
         "is_gated": chain.should_gate_answer(top_score, scores=scores),
         "reranker_top_score": top_score,
@@ -119,6 +128,22 @@ def matches_expected(cited_id: str, expected_set: set) -> bool:
     return False
 
 
+def _matches_expected_source(cited_source: Dict[str, Any], expected_source: Dict[str, Any]) -> bool:
+    """
+    Check if cited source matches expected law + article pair.
+
+    Article matching uses prefix semantics to preserve compatibility with
+    paragraph/subsection citations.
+    """
+    cited_law = (cited_source.get("law_id") or "").strip()
+    cited_article = (cited_source.get("article_id") or "").strip()
+    expected_law = (expected_source.get("law_id") or "").strip()
+    expected_article = (expected_source.get("article_id") or "").strip()
+    if not expected_law or not expected_article:
+        return False
+    return cited_law == expected_law and cited_article.startswith(expected_article)
+
+
 def create_citation_match_evaluator(settings: Settings):
     """
     Create a custom evaluator for citation matching.
@@ -136,20 +161,68 @@ def create_citation_match_evaluator(settings: Settings):
         
         Args:
             inputs: Input dictionary with 'question'
-            outputs: Output dictionary with 'cited_articles'
-            reference_outputs: Reference dictionary with 'expected_articles'
+            outputs: Output dictionary with 'cited_articles' and optional 'cited_sources'
+            reference_outputs: Reference dictionary with expected labels
             
         Returns:
             Evaluation result with score and comment
         """
+        expected_sources = reference_outputs.get("expected_sources", []) or []
         expected_articles = set(reference_outputs.get("expected_articles", []))
         cited_articles = outputs.get("cited_articles", [])
+        cited_sources = outputs.get("cited_sources", [])
+
+        # Prefer precise law-aware matching when expected_sources are provided.
+        if expected_sources:
+            if not cited_sources:
+                return {
+                    "key": "citation_match",
+                    "score": False,
+                    "comment": "No sources cited. Expected law/article pairs were provided.",
+                }
+
+            matched_pairs = []
+            found_expected_pairs = set()
+            for idx, expected in enumerate(expected_sources):
+                for cited in cited_sources:
+                    if _matches_expected_source(cited, expected):
+                        pair_key = (
+                            expected.get("law_id", ""),
+                            expected.get("article_id", ""),
+                        )
+                        found_expected_pairs.add(pair_key)
+                        matched_pairs.append(
+                            f"{cited.get('law_id', 'unknown')}:{cited.get('article_id', 'unknown')}"
+                        )
+                        break
+
+            coverage = len(found_expected_pairs) / len(expected_sources)
+            expected_fmt = ", ".join(
+                f"{s.get('law_id', 'unknown')}:{s.get('article_id', 'unknown')}"
+                for s in expected_sources
+            )
+            cited_fmt = ", ".join(
+                f"{s.get('law_id', 'unknown')}:{s.get('article_id', 'unknown')}"
+                for s in cited_sources
+            )
+
+            return {
+                "key": "citation_match",
+                "score": len(found_expected_pairs) > 0,
+                "comment": (
+                    "Law-aware citation matching. "
+                    f"Coverage: {coverage:.1%} "
+                    f"({len(found_expected_pairs)}/{len(expected_sources)} expected pairs). "
+                    f"Matched: {', '.join(matched_pairs) if matched_pairs else 'none'}. "
+                    f"Expected: {expected_fmt}. Cited: {cited_fmt}"
+                ),
+            }
         
         if not expected_articles:
             return {
                 "key": "citation_match",
                 "score": True,
-                "comment": "No expected articles specified",
+                "comment": "No expected citation labels specified",
             }
         
         if not cited_articles:
@@ -239,6 +312,43 @@ def create_offtopic_contamination_evaluator():
     return offtopic_contamination_evaluator
 
 
+def create_editorial_context_evaluator():
+    """
+    Evaluate whether editorial context is included when explicitly expected.
+
+    If expects_editorial_context=true in reference outputs, at least one cited
+    source should be tagged as doc_type=editorial_note.
+    """
+
+    def editorial_context_evaluator(
+        inputs: Dict[str, Any],
+        outputs: Dict[str, Any],
+        reference_outputs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        expects_editorial = bool(reference_outputs.get("expects_editorial_context", False))
+        if not expects_editorial:
+            return {
+                "key": "editorial_context",
+                "score": True,
+                "comment": "Skipped (editorial context not expected for this row).",
+            }
+
+        cited_sources = outputs.get("cited_sources", []) or []
+        editorial = [
+            s for s in cited_sources
+            if (s.get("doc_type") or "").strip().lower() == "editorial_note"
+        ]
+        return {
+            "key": "editorial_context",
+            "score": len(editorial) > 0,
+            "comment": (
+                f"expects_editorial_context=true, editorial_sources_found={len(editorial)}"
+            ),
+        }
+
+    return editorial_context_evaluator
+
+
 def main():
     """Run LangSmith evaluation."""
     settings = get_settings()
@@ -299,7 +409,10 @@ def main():
     # 3. Off-topic contamination evaluator (for expected_articles=[])
     evaluators.append(create_offtopic_contamination_evaluator())
 
-    # 4. Correctness evaluator
+    # 4. Editorial context evaluator (optional per-row expectation)
+    evaluators.append(create_editorial_context_evaluator())
+
+    # 5. Correctness evaluator
     correctness_evaluator = create_llm_as_judge(
         prompt=CORRECTNESS_PROMPT,
         feedback_key="correctness",
@@ -318,7 +431,7 @@ def main():
     
     evaluators.append(wrapped_correctness)
     
-    # 5. Groundedness evaluator
+    # 6. Groundedness evaluator
     groundedness_evaluator = create_llm_as_judge(
         prompt=RAG_GROUNDEDNESS_PROMPT,
         feedback_key="groundedness",
@@ -366,6 +479,7 @@ def main():
                     "retrieval_relevance",
                     "citation_match",
                     "offtopic_contamination",
+                    "editorial_context",
                     "correctness",
                     "groundedness",
                 ]

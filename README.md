@@ -89,6 +89,15 @@ Lovli requires legal data from Lovdata's bulk downloads.
    python scripts/index_laws.py data/nl/
    ```
 
+4. **Reindex validation (recommended after full rebuild)**:
+   ```bash
+   # Ensures metadata.doc_type exists on all points
+   python scripts/validate_reindex.py --require-zero-missing
+
+   # Optional: include retrieval smoke checks
+   python scripts/validate_reindex.py --require-zero-missing --with-smoke
+   ```
+
 ### Running the Application
 
 ```bash
@@ -106,6 +115,7 @@ lovli/
 │   ├── index_laws.py        # Index laws into Qdrant
 │   ├── build_catalog.py     # Generate law catalog with summaries
 │   ├── eval_langsmith.py    # Run LangSmith evaluations
+│   ├── validate_reindex.py  # Post-index metadata/retrieval validation
 │   └── upload_dataset.py    # Upload eval questions to LangSmith
 ├── src/
 │   └── lovli/

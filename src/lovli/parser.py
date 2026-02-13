@@ -12,6 +12,11 @@ logger = logging.getLogger(__name__)
 
 # Base URL for Lovdata links
 LOVDATA_BASE_URL = "https://lovdata.no"
+_PARAGRAPH_REF_RE = re.compile(r"§\s*(\d+[A-Za-z]?)\s*-\s*(\d+\s*[A-Za-z]?)")
+_EDITORIAL_NOTE_RE = re.compile(
+    r"^\s*(Endret ved lov|Tilføyd ved lov|Opphevet ved lov|Tilføyet ved lov)",
+    flags=re.IGNORECASE,
+)
 
 
 @dataclass(slots=True)
@@ -28,6 +33,8 @@ class LegalArticle:
     chapter_title: str | None = None
     cross_references: list[str] = field(default_factory=list)
     url: str | None = None
+    source_anchor_id: str | None = None
+    doc_type: str = "provision"
 
 
 def _extract_law_ref_from_filename(filename: str) -> str:
@@ -116,6 +123,64 @@ def _extract_cross_references(article_element: Tag, self_law_ref: str) -> list[s
             refs.append(base_href)
 
     return refs
+
+
+def _canonicalize_article_id(
+    raw_article_id: str,
+    title_text: str,
+    chapter_id: str | None,
+) -> str:
+    """
+    Convert raw Lovdata anchor IDs to canonical paragraph IDs.
+
+    Some Lovdata anchors can drift from visible paragraph numbering
+    (e.g. around inserted sections like § 9-3 a). This function prefers
+    the paragraph number shown in the article heading.
+    """
+    if not raw_article_id.startswith("kapittel-") or "-paragraf-" not in raw_article_id:
+        return raw_article_id
+
+    match = _PARAGRAPH_REF_RE.search(title_text or "")
+    if not match:
+        return raw_article_id
+
+    chapter_ref, paragraph_ref = match.group(1), match.group(2)
+    paragraph_ref = re.sub(r"\s+", "", paragraph_ref).lower()
+
+    # Prefer chapter from heading when available, fall back to chapter_id/raw id.
+    chapter_from_heading = chapter_ref.lower()
+    if chapter_from_heading and chapter_from_heading != "0":
+        chapter = chapter_from_heading
+    elif chapter_id and chapter_id.startswith("kapittel-"):
+        chapter = chapter_id.removeprefix("kapittel-").lower()
+    else:
+        chapter = raw_article_id.split("-")[1].lower()
+
+    return f"kapittel-{chapter}-paragraf-{paragraph_ref}"
+
+
+def _classify_doc_type(
+    raw_article_id: str,
+    title_text: str,
+    article_content: str,
+) -> str:
+    """
+    Classify parsed document chunks as substantive provisions or editorial notes.
+
+    Editorial notes are usually amendment history snippets (e.g. "Endret ved lov...")
+    that should stay attached to the same law, but be handled as supplemental context.
+    """
+    if "Untitled Article" == title_text:
+        return "editorial_note"
+
+    if _EDITORIAL_NOTE_RE.match(article_content or ""):
+        return "editorial_note"
+
+    # Fallback IDs indicate nodes without a stable Lovdata anchor in source.
+    if "_art_" in raw_article_id:
+        return "editorial_note"
+
+    return "provision"
 
 
 def _parse_lovdata_html(xml_path: Path) -> Iterator[LegalArticle]:
@@ -254,16 +319,17 @@ def _extract_article(
     """Extract a single LegalArticle from an <article> element."""
     try:
         # Article ID from the element's id attribute
-        article_id = article.get("id") or f"{law_id}_art_{idx}"
+        raw_article_id = article.get("id") or f"{law_id}_art_{idx}"
 
         # COARSE CHUNKING: Only index at paragraph level
         # Skip sub-articles like "kapittel-X-paragraf-Y-ledd-Z" or "X-punkt-Y"
-        if "-ledd-" in article_id or "-punkt-" in article_id:
+        if "-ledd-" in raw_article_id or "-punkt-" in raw_article_id:
             return None
 
         # Article title from <h3> element
         h3 = article.find("h3")
         title_text = h3.get_text(strip=True) if h3 else "Untitled Article"
+        article_id = _canonicalize_article_id(raw_article_id, title_text, chapter_id)
 
         # Extract article content (full text including all sub-articles)
         article_content = article.get_text(separator="\n", strip=True)
@@ -272,11 +338,13 @@ def _extract_article(
         if not article_content.strip():
             return None
 
+        doc_type = _classify_doc_type(raw_article_id, title_text, article_content)
+
         # Extract cross-references
         cross_refs = _extract_cross_references(article, law_ref)
 
-        # Build Lovdata URL for this article
-        url = f"{LOVDATA_BASE_URL}/{law_ref}#{article_id}"
+        # Build Lovdata URL for this article using source anchor.
+        url = f"{LOVDATA_BASE_URL}/{law_ref}#{raw_article_id}"
 
         return LegalArticle(
             article_id=article_id,
@@ -289,6 +357,8 @@ def _extract_article(
             chapter_title=chapter_title,
             cross_references=cross_refs,
             url=url,
+            source_anchor_id=raw_article_id,
+            doc_type=doc_type,
         )
     except Exception as e:
         logger.error(f"Error processing article {idx} in {xml_path}: {e}")

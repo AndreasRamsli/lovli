@@ -187,10 +187,35 @@ class TestParseHusleieloven:
             assert "-ledd-" not in art.article_id
             assert "-punkt-" not in art.article_id
 
+    def test_doc_type_defaults_and_editorial_notes(self):
+        """Parser should classify substantive sections vs editorial notes."""
+        articles = list(parse_xml_file(HUSLEIELOVEN_PATH))
+        assert any(a.doc_type == "provision" for a in articles)
+        editorial = [a for a in articles if a.doc_type == "editorial_note"]
+        assert editorial, "Expected at least one editorial note chunk in husleieloven"
+        assert all(a.law_id == "nl-19990326-017" for a in editorial)
+
     def test_url_format(self):
         articles = list(parse_xml_file(HUSLEIELOVEN_PATH))
         for art in articles:
             assert art.url.startswith("https://lovdata.no/lov/")
+
+    def test_canonical_article_ids_from_heading(self):
+        """Article IDs should follow visible § numbering (canonical IDs)."""
+        articles = list(parse_xml_file(HUSLEIELOVEN_PATH))
+        by_id = {a.article_id: a for a in articles}
+        assert "kapittel-9-paragraf-6" in by_id
+        assert "kapittel-9-paragraf-7" in by_id
+        assert "kapittel-9-paragraf-3a" in by_id
+
+    def test_source_anchor_id_preserved_for_urls(self):
+        """Source anchor IDs are preserved even when canonical IDs differ."""
+        articles = list(parse_xml_file(HUSLEIELOVEN_PATH))
+        oppsigelsesfrist = [a for a in articles if a.article_id == "kapittel-9-paragraf-6"]
+        assert len(oppsigelsesfrist) == 1
+        art = oppsigelsesfrist[0]
+        assert art.source_anchor_id == "kapittel-9-paragraf-7"
+        assert art.url.endswith("#kapittel-9-paragraf-7")
 
     def test_law_id(self):
         articles = list(parse_xml_file(HUSLEIELOVEN_PATH))

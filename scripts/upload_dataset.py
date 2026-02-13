@@ -127,6 +127,8 @@ def main():
             },
             "outputs": {
                 "expected_articles": q["expected_articles"],
+                "expected_sources": q.get("expected_sources", []),
+                "expects_editorial_context": bool(q.get("expects_editorial_context", False)),
                 "notes": q.get("notes", ""),
             },
             "metadata": {

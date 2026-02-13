@@ -23,6 +23,14 @@ MAX_QUESTION_LENGTH = 1000
 QUERY_REWRITE_MIN_LENGTH_RATIO = 0.5  # Rewritten query must be at least 50% of original length
 QUERY_REWRITE_HISTORY_WINDOW = 4  # Last 4 messages (2 turns) for context
 _ROUTING_TOKEN_RE = re.compile(r"[a-z0-9]{3,}")
+_EDITORIAL_HISTORY_INTENT_RE = re.compile(
+    r"\b("
+    r"endret|endring|endringer|endret|tilf[oø]y(d|et)|opphevet|historikk|"
+    r"tidligere|versjon|ikraft|ikrafttredelse|lovendring|amendment|"
+    r"change(s)?|history|repealed"
+    r")\b",
+    flags=re.IGNORECASE,
+)
 
 # Confidence gating response (used by both streaming and non-streaming paths)
 GATED_RESPONSE = (
@@ -44,6 +52,18 @@ def _sigmoid(x: float) -> float:
 def _tokenize_for_routing(text: str) -> set[str]:
     """Tokenize text for lightweight lexical routing."""
     return set(_ROUTING_TOKEN_RE.findall((text or "").lower()))
+
+
+def _infer_doc_type(metadata: Dict[str, Any]) -> str:
+    """Infer doc type with backward-compatible fallbacks for legacy payloads."""
+    doc_type = (metadata.get("doc_type") or "").strip().lower()
+    if doc_type in {"provision", "editorial_note"}:
+        return doc_type
+    title = (metadata.get("title") or "").strip()
+    article_id = (metadata.get("article_id") or "").strip()
+    if title == "Untitled Article" or "_art_" in article_id:
+        return "editorial_note"
+    return "provision"
 
 
 class LegalRAGChain:
@@ -186,11 +206,34 @@ Kontekst fra lovtekster:
         return question
 
     def _format_context(self, sources: list[Dict[str, Any]]) -> str:
-        """Format retrieved sources into a single context string."""
-        return "\n\n".join([
-            f"Lov: {s['law_title']} (§ {s['article_id']})\n{s.get('content', '')}"
-            for s in sources
-        ])
+        """Format retrieved sources with legal basis first and editorial notes second."""
+        provisions = [s for s in sources if s.get("doc_type") != "editorial_note"]
+        editorial_notes = [s for s in sources if s.get("doc_type") == "editorial_note"]
+
+        blocks: list[str] = []
+        if provisions:
+            blocks.append(
+                "Lovgrunnlag:\n"
+                + "\n\n".join(
+                    [
+                        f"Lov: {s['law_title']} (§ {s['article_id']})\n{s.get('content', '')}"
+                        for s in provisions
+                    ]
+                )
+            )
+
+        if editorial_notes:
+            blocks.append(
+                "Endringshistorikk (redaksjonelle merknader):\n"
+                + "\n\n".join(
+                    [
+                        f"Lov: {s['law_title']} ({s['article_id']})\n{s.get('content', '')}"
+                        for s in editorial_notes
+                    ]
+                )
+            )
+
+        return "\n\n".join(blocks)
 
     def _extract_sources(
         self, 
@@ -216,11 +259,70 @@ Kontekst fra lovtekster:
                     "chapter_id": metadata.get("chapter_id"),
                     "chapter_title": metadata.get("chapter_title"),
                     "url": metadata.get("url"),
+                    "source_anchor_id": metadata.get("source_anchor_id"),
+                    "doc_type": _infer_doc_type(metadata),
                 }
                 if include_content:
                     source["content"] = doc.page_content if hasattr(doc, "page_content") else ""
                 sources.append(source)
         return sources
+
+    def _is_history_intent(self, retrieval_query: str) -> bool:
+        """Detect whether user likely wants amendment/change-history context."""
+        return bool(_EDITORIAL_HISTORY_INTENT_RE.search((retrieval_query or "").lower()))
+
+    def _compute_editorial_budget(self, total_docs: int, retrieval_query: str) -> int:
+        """
+        Compute editorial-note allowance from configurable budget controls.
+
+        Keeps behavior conservative by default while allowing expansion on
+        history-oriented queries.
+        """
+        if total_docs <= 0:
+            return 0
+
+        base_max = self.settings.editorial_base_max_notes
+        hard_max = self.settings.editorial_max_notes
+        if hard_max <= 0:
+            return 0
+
+        ratio_slots = math.ceil(total_docs * self.settings.editorial_context_budget_ratio)
+        budget = max(base_max, ratio_slots)
+
+        if self._is_history_intent(retrieval_query):
+            budget += self.settings.editorial_history_intent_boost
+
+        return min(hard_max, max(0, budget))
+
+    def _prioritize_doc_types(
+        self, docs: list, scores: list[float], retrieval_query: str
+    ) -> tuple[list, list[float]]:
+        """
+        Keep substantive provisions as primary context and budget editorial notes.
+
+        Editorial notes are still retained as supplemental context.
+        """
+        if not docs:
+            return docs, scores
+
+        zipped = list(zip(docs, scores)) if scores and len(scores) == len(docs) else [(doc, None) for doc in docs]
+        provisions: list[tuple[Any, float | None]] = []
+        editorial: list[tuple[Any, float | None]] = []
+        for doc, score in zipped:
+            metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+            if _infer_doc_type(metadata) == "editorial_note":
+                editorial.append((doc, score))
+            else:
+                provisions.append((doc, score))
+
+        editorial_budget = self._compute_editorial_budget(
+            total_docs=len(docs),
+            retrieval_query=retrieval_query,
+        )
+        selected = provisions + editorial[:editorial_budget]
+        selected_docs = [doc for doc, _ in selected]
+        selected_scores = [score for _, score in selected if score is not None]
+        return selected_docs, selected_scores
 
     def _rerank(self, query: str, docs: list, top_k: int | None = None) -> Tuple[list, list[float]]:
         """
@@ -506,11 +608,14 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
         if self.reranker and docs:
             docs, scores = self._rerank(retrieval_query, docs, top_k=self.settings.retrieval_k)
             docs, scores = self._apply_reranker_doc_filter(docs, scores)
+            docs, scores = self._prioritize_doc_types(docs, scores, retrieval_query=retrieval_query)
             top_score = scores[0] if scores else None
             if top_score is not None:
                 logger.debug(f"Reranked {len(docs)} documents, top score: {top_score:.3f}")
             else:
                 logger.debug(f"Reranking returned no scores for {len(docs)} documents")
+        elif docs:
+            docs, scores = self._prioritize_doc_types(docs, scores, retrieval_query=retrieval_query)
         
         sources = self._extract_sources(docs, include_content=True)
         return sources, top_score, scores

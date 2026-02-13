@@ -24,13 +24,17 @@ def mock_settings():
     settings.retrieval_k = 5
     settings.retrieval_k_initial = 15
     settings.reranker_model = "BAAI/bge-reranker-v2-m3"
-    settings.reranker_enabled = True
+    settings.reranker_enabled = False
     settings.reranker_confidence_threshold = 0.3
     settings.reranker_min_doc_score = 0.3
     settings.reranker_min_sources = 2
     settings.reranker_ambiguity_gating_enabled = True
     settings.reranker_ambiguity_min_gap = 0.08
     settings.reranker_ambiguity_top_score_ceiling = 0.65
+    settings.editorial_base_max_notes = 2
+    settings.editorial_max_notes = 4
+    settings.editorial_context_budget_ratio = 0.4
+    settings.editorial_history_intent_boost = 1
     settings.law_routing_enabled = False
     settings.law_catalog_path = "data/law_catalog.json"
     settings.law_routing_max_candidates = 3
@@ -240,3 +244,142 @@ def test_invoke_retriever_falls_back_when_filtered_empty(mock_settings):
         chain = LegalRAGChain(mock_settings)
         docs = chain._invoke_retriever("test", routed_law_ids=["nl-19990326-017"])
         assert docs == ["fallback_doc"]
+
+
+def test_extract_sources_includes_doc_type(mock_settings):
+    """Source extraction should carry doc_type for downstream formatting/eval."""
+    with patch('lovli.chain.QdrantVectorStore'), \
+         patch('lovli.chain.HuggingFaceEmbeddings'), \
+         patch('lovli.chain.ChatOpenAI'), \
+         patch('lovli.chain.QdrantClient'):
+        chain = LegalRAGChain(mock_settings)
+        doc = Mock(
+            metadata={
+                "law_id": "nl-19990326-017",
+                "law_title": "Husleieloven",
+                "article_id": "kapittel-9-paragraf-6",
+                "title": "§ 9-6",
+                "doc_type": "provision",
+            },
+            page_content="Oppsigelsesfristen er tre måneder",
+        )
+        sources = chain._extract_sources([doc], include_content=True)
+        assert len(sources) == 1
+        assert sources[0]["doc_type"] == "provision"
+
+
+def test_prioritize_doc_types_adaptive_budget(mock_settings):
+    """Editorial notes should respect adaptive budget while provisions stay first."""
+    with patch('lovli.chain.QdrantVectorStore'), \
+         patch('lovli.chain.HuggingFaceEmbeddings'), \
+         patch('lovli.chain.ChatOpenAI'), \
+         patch('lovli.chain.QdrantClient'):
+        chain = LegalRAGChain(mock_settings)
+        docs = [
+            Mock(metadata={"article_id": "art-1", "doc_type": "provision"}),
+            Mock(metadata={"article_id": "art-2", "doc_type": "editorial_note"}),
+            Mock(metadata={"article_id": "art-3", "doc_type": "editorial_note"}),
+            Mock(metadata={"article_id": "art-4", "doc_type": "editorial_note"}),
+        ]
+        scores = [0.9, 0.8, 0.7, 0.6]
+        selected_docs, selected_scores = chain._prioritize_doc_types(
+            docs,
+            scores,
+            retrieval_query="Hva er reglene for oppsigelse?",
+        )
+        assert len(selected_docs) == 3  # 1 provision + 2 editorial notes at default budget
+        assert selected_docs[0].metadata["doc_type"] == "provision"
+        assert selected_scores == [0.9, 0.8, 0.7]
+
+
+def test_format_context_separates_editorial_section(mock_settings):
+    """Context formatter should separate legal basis and editorial history."""
+    with patch('lovli.chain.QdrantVectorStore'), \
+         patch('lovli.chain.HuggingFaceEmbeddings'), \
+         patch('lovli.chain.ChatOpenAI'), \
+         patch('lovli.chain.QdrantClient'):
+        chain = LegalRAGChain(mock_settings)
+        sources = [
+            {
+                "law_title": "Husleieloven",
+                "article_id": "kapittel-9-paragraf-6",
+                "doc_type": "provision",
+                "content": "Oppsigelsesfristen er tre måneder.",
+            },
+            {
+                "law_title": "Husleieloven",
+                "article_id": "nl-19990326-017_art_6",
+                "doc_type": "editorial_note",
+                "content": "Endret ved lov 16 jan 2009 nr. 6.",
+            },
+        ]
+        context = chain._format_context(sources)
+        assert "Lovgrunnlag:" in context
+        assert "Endringshistorikk (redaksjonelle merknader):" in context
+
+
+def test_prioritize_doc_types_history_intent_boost(mock_settings):
+    """History intent should allow one extra editorial note (up to max)."""
+    with patch('lovli.chain.QdrantVectorStore'), \
+         patch('lovli.chain.HuggingFaceEmbeddings'), \
+         patch('lovli.chain.ChatOpenAI'), \
+         patch('lovli.chain.QdrantClient'):
+        chain = LegalRAGChain(mock_settings)
+        docs = [
+            Mock(metadata={"article_id": "p-1", "doc_type": "provision"}),
+            Mock(metadata={"article_id": "e-1", "doc_type": "editorial_note"}),
+            Mock(metadata={"article_id": "e-2", "doc_type": "editorial_note"}),
+            Mock(metadata={"article_id": "e-3", "doc_type": "editorial_note"}),
+            Mock(metadata={"article_id": "e-4", "doc_type": "editorial_note"}),
+        ]
+        scores = [0.91, 0.85, 0.83, 0.8, 0.78]
+        selected_docs, _ = chain._prioritize_doc_types(
+            docs,
+            scores,
+            retrieval_query="Hva er endringshistorikk og når ble paragrafen endret?",
+        )
+        assert len(selected_docs) == 4  # 1 provision + 3 editorial (boosted from 2 to 3)
+        assert [d.metadata["article_id"] for d in selected_docs] == ["p-1", "e-1", "e-2", "e-3"]
+
+
+def test_prioritize_doc_types_no_provision_edge_case(mock_settings):
+    """When only editorial docs are retrieved, budget still applies deterministically."""
+    with patch('lovli.chain.QdrantVectorStore'), \
+         patch('lovli.chain.HuggingFaceEmbeddings'), \
+         patch('lovli.chain.ChatOpenAI'), \
+         patch('lovli.chain.QdrantClient'):
+        chain = LegalRAGChain(mock_settings)
+        docs = [
+            Mock(metadata={"article_id": "e-1", "doc_type": "editorial_note"}),
+            Mock(metadata={"article_id": "e-2", "doc_type": "editorial_note"}),
+            Mock(metadata={"article_id": "e-3", "doc_type": "editorial_note"}),
+        ]
+        scores = [0.8, 0.7, 0.6]
+        selected_docs, selected_scores = chain._prioritize_doc_types(
+            docs,
+            scores,
+            retrieval_query="Hva står i loven?",
+        )
+        assert [d.metadata["article_id"] for d in selected_docs] == ["e-1", "e-2"]
+        assert selected_scores == [0.8, 0.7]
+
+
+def test_prioritize_doc_types_no_editorial_edge_case(mock_settings):
+    """When no editorial docs exist, all provisions should pass through."""
+    with patch('lovli.chain.QdrantVectorStore'), \
+         patch('lovli.chain.HuggingFaceEmbeddings'), \
+         patch('lovli.chain.ChatOpenAI'), \
+         patch('lovli.chain.QdrantClient'):
+        chain = LegalRAGChain(mock_settings)
+        docs = [
+            Mock(metadata={"article_id": "p-1", "doc_type": "provision"}),
+            Mock(metadata={"article_id": "p-2", "doc_type": "provision"}),
+        ]
+        scores = [0.92, 0.9]
+        selected_docs, selected_scores = chain._prioritize_doc_types(
+            docs,
+            scores,
+            retrieval_query="Hva står i § 9-6?",
+        )
+        assert [d.metadata["article_id"] for d in selected_docs] == ["p-1", "p-2"]
+        assert selected_scores == [0.92, 0.9]
