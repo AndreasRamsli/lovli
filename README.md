@@ -14,10 +14,12 @@ Lovli helps private users find information about Norwegian laws using natural la
 - **Multi-stage retrieval**: query analysis -> hybrid search -> reranking -> generation
 - **Hybrid search** combining semantic (dense) and keyword (sparse) matching using BGE-M3
 - **Cross-encoder reranking** using `bge-reranker-v2-m3` for high precision
+- **Adaptive editorial context**: provisions are prioritized, while editorial notes are included as supplemental context when budget and query intent indicate relevance
 - **Hierarchical parsing**: extracts Law -> Chapter -> Section structure
 - **Cross-reference extraction**: captures links between different laws
 - **Confidence gating**: avoids low-confidence answers when retrieval is weak
 - **Conversation-aware**: rewrites follow-up questions using chat history
+- **Law-aware evaluation labels** via `expected_sources` (`law_id` + `article_id`) for stricter citation matching
 - **Streamlit-based chat interface** with inline citations and source links
 - **Evaluation via LangSmith** with LLM-as-judge metrics
 
@@ -97,6 +99,15 @@ Lovli requires legal data from Lovdata's bulk downloads.
    # Optional: include retrieval smoke checks
    python scripts/validate_reindex.py --require-zero-missing --with-smoke
    ```
+
+### Retrieval controls
+
+Recent retrieval behavior can be tuned without code changes through `.env`:
+
+- `RETRIEVAL_K_INITIAL` (over-retrieval before reranking)
+- `RERANKER_MIN_DOC_SCORE` and `RERANKER_MIN_SOURCES` (per-doc filtering safety floor)
+- `RERANKER_AMBIGUITY_MIN_GAP` and `RERANKER_AMBIGUITY_TOP_SCORE_CEILING` (ambiguity gating)
+- `EDITORIAL_BASE_MAX_NOTES`, `EDITORIAL_MAX_NOTES`, `EDITORIAL_CONTEXT_BUDGET_RATIO`, `EDITORIAL_HISTORY_INTENT_BOOST` (adaptive editorial context budgeting)
 
 ### Running the Application
 

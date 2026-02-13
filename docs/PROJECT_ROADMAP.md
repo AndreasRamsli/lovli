@@ -52,6 +52,8 @@ Improve retrieval precision before scaling to more laws.
 - [x] **Hybrid search**: Add sparse vectors (BM25) alongside dense embeddings in Qdrant using BGE-M3's built-in sparse encoder. Catches exact section references (e.g., "§ 3-5") that pure semantic search misses.
 - [x] **Cross-encoder reranker**: Over-retrieve (k=15), then rerank with `bge-reranker-v2-m3` to select the top 5 by actual relevance. Drop-in improvement, measurable via LangSmith.
 - [x] **Confidence gating**: When reranker scores are low, respond with "Jeg fant ikke et klart svar" instead of guessing. Ask for clarification when retrieval is weak.
+- [x] **Ambiguity gating**: Gate responses when top reranker scores are too close and low-confidence.
+- [x] **Per-document filtering**: Drop weak reranked documents while enforcing a minimum source floor.
 - [x] **Conversation-aware retrieval**: Rewrite follow-up questions using chat history before retrieval (e.g., "Hva er fristen for det?" -> "Hva er fristen for husleieøkning?").
 - [x] **Deduplication**: Implemented document deduplication before reranking to improve efficiency and result quality.
 - [x] **Multilingual support**: Optimized for Norwegian legal text using BGE-M3 and specific Lovdata parsing rules.
@@ -63,6 +65,8 @@ Enrich the data layer to support multi-law retrieval and cross-referencing.
 - [x] **Cross-reference parsing**: Detect and store explicit references between sections (e.g., "jf. forbrukerkjøpsloven § 15") as structured metadata.
 - [x] **Law-level summaries**: Generate a 2-3 sentence LLM summary for each of the 735 laws, describing scope and target audience. This becomes the routing index.
 - [x] **Metadata-rich payloads**: Store `law_id`, `law_title`, `law_short_name`, `chapter_id`, `chapter_title`, `cross_references`, and `url` on every indexed article.
+- [x] **Canonical article IDs + source anchors**: Normalize paragraph IDs while preserving original Lovdata anchor IDs.
+- [x] **Document typing**: Classify and store `doc_type` (`provision` vs `editorial_note`) for retrieval formatting and ranking policy.
 
 ## Phase 6: Multi-Stage Retrieval Pipeline (Next)
 Build the robust, multi-stage pipeline for full-corpus retrieval.
@@ -77,6 +81,7 @@ Build the robust, multi-stage pipeline for full-corpus retrieval.
 - [ ] **Law routing**: For broad questions, use LLM + law catalog to identify 1-3 candidate laws before retrieval.
 - [x] **Filtered hybrid search**: Search article index filtered to candidate laws, combining semantic and keyword matching.
 - [x] **Reranking**: Cross-encoder rescoring of candidates.
+- [x] **Editorial context policy**: Keep provisions primary and include editorial notes with adaptive, intent-aware budget.
 - [ ] **Cross-reference expansion**: Automatically fetch articles referenced by the top results (e.g., "jf. § 9-10").
 - [ ] Migrate pipeline orchestration from `create_retrieval_chain` to **LangGraph** for multi-step control flow.
 
@@ -84,6 +89,8 @@ Build the robust, multi-stage pipeline for full-corpus retrieval.
 - [ ] Expand eval set to 50-100 questions spanning 10-15 consumer-relevant laws.
 - [ ] Test categories: single-law/single-section, single-law/multi-section, cross-law, direct lookups, follow-ups, out-of-scope.
 - [ ] Measure each pipeline stage independently (routing accuracy, retrieval recall, reranker precision, answer quality).
+- [x] Add law-aware expected source labels (`law_id` + `article_id`) to reduce false-positive citation matches.
+- [x] Add post-reindex metadata validation (`missing_doc_type == 0`) and retrieval smoke checks.
 - [ ] Ensure 0 hallucinated law sections in 50 test queries.
 - [ ] Deploy to Streamlit Cloud for private feedback.
 - [ ] Index all 735 laws and regulations from Lovdata bulk downloads.

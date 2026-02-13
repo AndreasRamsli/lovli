@@ -29,10 +29,11 @@ Lovli is an LLM-powered legal information tool using a multi-stage Retrieval-Aug
 
 ### Current
 1. **Source**: HTML files from Lovdata bulk downloads (`/data/nl` and `/data/sf`).
-2. **Parser**: Custom BeautifulSoup4 parser with hierarchical extraction (Law -> Chapter -> Section).
+2. **Parser**: Custom BeautifulSoup4 parser with hierarchical extraction (Law -> Chapter -> Section), canonical paragraph IDs, source anchors, and `doc_type` classification.
 3. **Enrichment**: Cross-reference extraction from `<a href>` links and LLM-generated law summaries.
 4. **Law Catalog**: Tier 0 catalog of all 735+ laws with metadata and summaries.
-5. **Indexing**: BGE-M3 dense + sparse embeddings stored in Qdrant with rich metadata payloads.
+5. **Indexing**: BGE-M3 dense + sparse embeddings stored in Qdrant with rich metadata payloads, including explicit `doc_type` and `source_anchor_id`.
+6. **Validation**: Post-reindex scan verifies metadata completeness (`missing_doc_type == 0`) before rollout.
 
 ### Planned (Multi-Stage)
 1. **Source**: Full Lovdata bulk downloads — all 735+ current laws and central regulations.
@@ -46,7 +47,7 @@ Lovli is an LLM-powered legal information tool using a multi-stage Retrieval-Aug
 ## Retrieval Pipeline
 
 ### Current
-Multi-stage retrieval: query analysis -> hybrid search -> reranking -> generation.
+Multi-stage retrieval: query analysis -> hybrid search -> reranking -> doc-type prioritization -> generation.
 
 ### Target Architecture
 ```
@@ -64,6 +65,10 @@ Query Analysis (classify, rewrite, extract refs)
             |
             v
       Reranking (cross-encoder, top 5)
+            |
+            v
+      Doc-Type Prioritization
+      (provisions first, editorial notes as adaptive supplemental context)
             |
             v
       Cross-Reference Expansion (fetch referenced sections)

@@ -53,10 +53,18 @@ A **cross-encoder reranker** (bge-reranker-v2-m3) rescores all 15 candidates by 
 
 The top 5 after reranking go to generation.
 
-### Stage 5: Cross-Reference Expansion (Planned)
+### Stage 5: Editorial-Note Prioritization (Implemented)
+Legal corpora include both substantive provisions and editorial change notes (e.g., amendment history lines). Lovli now treats these as different document types:
+
+- **`provision`**: primary legal basis used first in context.
+- **`editorial_note`**: supplemental context, included with an adaptive budget.
+
+The editorial budget is controlled by config and can expand for history-intent queries (e.g., "når ble denne endret?"), while preserving deterministic ordering (provisions first, then editorial notes by score).
+
+### Stage 6: Cross-Reference Expansion (Planned)
 Norwegian law sections frequently reference other sections (e.g., "jf. § 9-10"). If the top results contain cross-references, the system fetches those referenced articles as additional context. [DONE: Cross-reference parsing implemented]
 
-### Stage 6: Answer Generation (Implemented)
+### Stage 7: Answer Generation (Implemented)
 The LLM generates an answer using the retrieved context with:
 - **Inline citations**: Every claim references a specific section (e.g., "husleieloven § 3-5").
 - **Confidence gating**: If retrieval scores are low, the system says "I couldn't find a clear answer" rather than guessing.
@@ -84,6 +92,8 @@ Qdrant combines both in a single query, weighting each appropriately. This means
 ## Citations & Accuracy
 Because we use RAG, every answer can be linked back to a specific Lovdata URL for the source section, ensuring users can verify the information at the original source. The multi-stage pipeline with reranking and confidence gating significantly reduces hallucinated or incorrect citations compared to single-pass retrieval.
 
+To reduce false positives in evaluation, Lovli also supports **law-aware expected citations** (`expected_sources`) that match both `law_id` and `article_id`, not just article IDs.
+
 ## Evaluation Strategy
 
 Each pipeline stage is evaluated independently via LangSmith:
@@ -91,5 +101,14 @@ Each pipeline stage is evaluated independently via LangSmith:
 - **Retrieval recall**: Are the correct articles in the top-k?
 - **Reranker precision**: Does reranking improve ordering?
 - **Answer quality**: Is the final answer correct, grounded, and well-cited?
+- **Editorial-context behavior**: Are editorial notes included when expected, while provisions remain primary?
 
 This per-stage measurement lets us identify exactly where failures occur and fix the right component.
+
+## Reindex Hygiene
+
+Retriever behavior depends on consistent metadata. After full rebuilds, run explicit post-index validation to confirm:
+
+- `metadata.doc_type` is present on all points.
+- Distribution sanity between `provision` and `editorial_note`.
+- Retrieval smoke checks preserve provisions-first ordering.
