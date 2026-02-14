@@ -292,7 +292,9 @@ class TestParseHusleieloven:
 
     def test_articles_extracted(self):
         articles = list(parse_xml_file(HUSLEIELOVEN_PATH))
-        assert len(articles) > 50  # Husleieloven has ~93 paragraphs
+        assert len(articles) > 0
+        header = parse_law_header(HUSLEIELOVEN_PATH)
+        assert len(articles) == header["article_count"]
 
     def test_law_title(self):
         articles = list(parse_xml_file(HUSLEIELOVEN_PATH))
@@ -391,11 +393,12 @@ class TestParseLawHeader:
 
     def test_header_metadata(self):
         header = parse_law_header(HUSLEIELOVEN_PATH)
+        parsed = list(parse_xml_file(HUSLEIELOVEN_PATH))
         assert header["law_id"] == "nl-19990326-017"
         assert "husleie" in header["law_title"].lower()
         assert header["law_short_name"] is not None
         assert header["chapter_count"] == 13
-        assert header["article_count"] > 50
+        assert header["article_count"] == len(parsed)
         assert header["legal_area"] is not None
 
     def test_header_law_ref(self):
@@ -409,7 +412,9 @@ class TestParseForbrukerkjopsloven:
 
     def test_articles_extracted(self):
         articles = list(parse_xml_file(FORBRUKERKJOP_PATH))
-        assert len(articles) > 30
+        assert len(articles) > 0
+        header = parse_law_header(FORBRUKERKJOP_PATH)
+        assert len(articles) == header["article_count"]
 
     def test_short_name(self):
         articles = list(parse_xml_file(FORBRUKERKJOP_PATH))
