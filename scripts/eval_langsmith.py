@@ -6,6 +6,7 @@ Evaluates retrieval relevance, citation accuracy, correctness, and groundedness.
 
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Dict, Any
@@ -144,6 +145,21 @@ def _matches_expected_source(cited_source: Dict[str, Any], expected_source: Dict
     return cited_law == expected_law and cited_article.startswith(expected_article)
 
 
+def _infer_negative_type(reference_outputs: Dict[str, Any]) -> str:
+    """Infer negative subtype from explicit field, category, or notes suffix."""
+    explicit = (reference_outputs.get("negative_type") or "").strip().lower()
+    if explicit:
+        return explicit
+    category = (reference_outputs.get("category") or "").strip().lower()
+    if category in {"ambiguity", "offtopic_legal", "offtopic_nonlegal"}:
+        return category
+    notes = (reference_outputs.get("notes") or "")
+    match = re.search(r"negative_type:\s*([a-z_]+)", notes, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip().lower()
+    return "unknown"
+
+
 def create_citation_match_evaluator(settings: Settings):
     """
     Create a custom evaluator for citation matching.
@@ -271,6 +287,63 @@ def create_citation_match_evaluator(settings: Settings):
     return citation_match_evaluator
 
 
+def create_citation_precision_evaluator():
+    """Measure citation precision so noisy extra citations are penalized."""
+
+    def citation_precision_evaluator(
+        inputs: Dict[str, Any],
+        outputs: Dict[str, Any],
+        reference_outputs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        expected_sources = reference_outputs.get("expected_sources", []) or []
+        expected_articles = set(reference_outputs.get("expected_articles", []))
+        cited_sources = outputs.get("cited_sources", []) or []
+        cited_articles = outputs.get("cited_articles", []) or []
+
+        # Skip rows without positive expectation.
+        if not expected_sources and not expected_articles:
+            return {
+                "key": "citation_precision",
+                "score": True,
+                "comment": "Skipped (no expected citation labels for this row).",
+            }
+
+        if expected_sources:
+            if not cited_sources:
+                return {
+                    "key": "citation_precision",
+                    "score": 0.0,
+                    "comment": "No cited sources; precision=0.0 for positive-labeled row.",
+                }
+            tp = 0
+            for cited in cited_sources:
+                if any(_matches_expected_source(cited, exp) for exp in expected_sources):
+                    tp += 1
+            precision = tp / len(cited_sources)
+            return {
+                "key": "citation_precision",
+                "score": precision,
+                "comment": f"Law-aware precision={precision:.1%} ({tp}/{len(cited_sources)} matched cited sources).",
+            }
+
+        if not cited_articles:
+            return {
+                "key": "citation_precision",
+                "score": 0.0,
+                "comment": "No cited articles; precision=0.0 for positive-labeled row.",
+            }
+
+        tp = sum(1 for cid in cited_articles if matches_expected(cid, expected_articles))
+        precision = tp / len(cited_articles)
+        return {
+            "key": "citation_precision",
+            "score": precision,
+            "comment": f"Article precision={precision:.1%} ({tp}/{len(cited_articles)} matched cited articles).",
+        }
+
+    return citation_precision_evaluator
+
+
 def create_offtopic_contamination_evaluator():
     """
     Evaluate whether ambiguous/off-topic prompts incorrectly return citations.
@@ -297,6 +370,7 @@ def create_offtopic_contamination_evaluator():
         answer = outputs.get("answer", "")
         is_gated = outputs.get("is_gated", False)
         no_results = "Beklager, jeg kunne ikke finne informasjon" in answer
+        negative_type = _infer_negative_type(reference_outputs)
 
         ok = is_gated or no_results or len(cited_articles) == 0
         return {
@@ -304,6 +378,7 @@ def create_offtopic_contamination_evaluator():
             "score": ok,
             "comment": (
                 "No expected articles. "
+                f"negative_type={negative_type}. "
                 f"is_gated={is_gated}, cited={len(cited_articles)}, "
                 f"no_results={no_results}"
             ),
@@ -409,10 +484,13 @@ def main():
     # 3. Off-topic contamination evaluator (for expected_articles=[])
     evaluators.append(create_offtopic_contamination_evaluator())
 
-    # 4. Editorial context evaluator (optional per-row expectation)
+    # 4. Citation precision evaluator (penalize noisy extra citations)
+    evaluators.append(create_citation_precision_evaluator())
+
+    # 5. Editorial context evaluator (optional per-row expectation)
     evaluators.append(create_editorial_context_evaluator())
 
-    # 5. Correctness evaluator
+    # 6. Correctness evaluator
     correctness_evaluator = create_llm_as_judge(
         prompt=CORRECTNESS_PROMPT,
         feedback_key="correctness",
@@ -431,7 +509,7 @@ def main():
     
     evaluators.append(wrapped_correctness)
     
-    # 6. Groundedness evaluator
+    # 7. Groundedness evaluator
     groundedness_evaluator = create_llm_as_judge(
         prompt=RAG_GROUNDEDNESS_PROMPT,
         feedback_key="groundedness",
@@ -478,6 +556,7 @@ def main():
                 evaluator_names = [
                     "retrieval_relevance",
                     "citation_match",
+                    "citation_precision",
                     "offtopic_contamination",
                     "editorial_context",
                     "correctness",
@@ -497,6 +576,34 @@ def main():
                     if scores:
                         avg_score = sum(scores) / len(scores)
                         logger.info(f"  {evaluator_name}: {avg_score:.2%} average ({len(scores)}/{len(experiment_results.results)} evaluated)")
+
+                # Off-topic breakdown by negative type (parsed from evaluator comment).
+                neg_breakdown: Dict[str, list[float]] = {
+                    "ambiguity": [],
+                    "offtopic_legal": [],
+                    "offtopic_nonlegal": [],
+                    "unknown": [],
+                }
+                for r in experiment_results.results:
+                    if not (hasattr(r, "feedback_results") and r.feedback_results):
+                        continue
+                    feedback = r.feedback_results.get("offtopic_contamination")
+                    if not (feedback and isinstance(feedback, dict)):
+                        continue
+                    score = feedback.get("score")
+                    comment = str(feedback.get("comment", ""))
+                    match = re.search(r"negative_type=([a-z_]+)", comment)
+                    neg_type = match.group(1) if match else "unknown"
+                    if neg_type not in neg_breakdown:
+                        neg_type = "unknown"
+                    if score is not None:
+                        neg_breakdown[neg_type].append(
+                            1.0 if score is True else (0.0 if score is False else float(score))
+                        )
+                logger.info("  offtopic_contamination by type:")
+                for neg_type, vals in neg_breakdown.items():
+                    if vals:
+                        logger.info("    %s: %.2f%% (%s)", neg_type, 100 * sum(vals) / len(vals), len(vals))
         except Exception as e:
             logger.debug(f"Could not compute summary statistics: {e}")
             logger.info("View detailed results in the LangSmith UI")
