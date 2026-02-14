@@ -79,6 +79,20 @@ class TestExtractCrossReferences:
         refs = _extract_cross_references(article, "lov/1999-03-26-17")
         assert len(refs) == 0
 
+    def test_self_refs_excluded_with_zero_padding_mismatch(self):
+        html = """
+        <article id="test">
+            <p>
+              <a href="lov/1999-03-26-17/§3-5">§ 3-5</a>
+              <a href="lov/1999-03-26-17#kapittel-3-paragraf-5">§ 3-5 anchor</a>
+            </p>
+        </article>
+        """
+        soup = BeautifulSoup(html, "html.parser")
+        article = soup.find("article")
+        refs = _extract_cross_references(article, "lov/1999-03-26-017")
+        assert refs == []
+
     def test_forskrift_refs(self):
         html = """
         <article id="test">
@@ -155,6 +169,118 @@ def test_fallback_source_anchor_id_is_unique_across_chapters(tmp_path):
     assert len(set(source_ids)) == 2
     assert source_ids[0] == "nl-20990101-001_kapittel-1_art_0"
     assert source_ids[1] == "nl-20990101-001_kapittel-2_art_0"
+
+
+def test_mixed_structure_keeps_root_level_articles(tmp_path):
+    """Root-level substantive articles should be kept even when sections exist."""
+    sample = tmp_path / "sf-20990101-001.xml"
+    sample.write_text(
+        """
+        <html>
+          <body>
+            <dd class="title">Testforskrift</dd>
+            <section id="kapittel-1">
+              <h2>Kapittel 1. Innledning</h2>
+              <article id="kapittel-1-paragraf-1">
+                <h3>§ 1. Definisjon</h3>
+                <p>Definisjonstekst.</p>
+              </article>
+            </section>
+            <article id="paragraf-2">
+              <p>Dette er en selvstendig bestemmelse utenfor section.</p>
+            </article>
+          </body>
+        </html>
+        """,
+        encoding="utf-8",
+    )
+
+    articles = list(parse_xml_file(sample))
+    ids = {a.article_id for a in articles}
+    assert "kapittel-1-paragraf-1" in ids
+    assert "paragraf-2" in ids
+
+
+def test_relaxed_nested_fallback_when_coarse_yields_zero(tmp_path):
+    """Parser should keep nested IDs when strict filtering would drop everything."""
+    sample = tmp_path / "sf-20990101-002.xml"
+    sample.write_text(
+        """
+        <html>
+          <body>
+            <dd class="title">Kun nested innhold</dd>
+            <article id="kapittel-1-ledd-1">
+              <p>Første ledd med materiell regel.</p>
+            </article>
+            <article id="kapittel-1-ledd-2">
+              <p>Andre ledd med materiell regel.</p>
+            </article>
+          </body>
+        </html>
+        """,
+        encoding="utf-8",
+    )
+
+    articles = list(parse_xml_file(sample))
+    assert len(articles) == 2
+    assert {a.source_anchor_id for a in articles} == {"kapittel-1-ledd-1", "kapittel-1-ledd-2"}
+
+
+def test_fallback_art_doc_type_uses_content_signals(tmp_path):
+    """_art_ fallback chunks should not always be classified as editorial."""
+    sample = tmp_path / "nl-20990101-003.xml"
+    sample.write_text(
+        """
+        <html>
+          <body>
+            <dd class="title">Fallback doc type test</dd>
+            <section id="kapittel-1">
+              <h2>Kapittel 1. Endringer</h2>
+              <article>
+                <p>§ 15-13 a tredje ledd skal lyde: Dette er operativ lovtekst.</p>
+              </article>
+              <article>
+                <p>Endret ved lov 1 jan 2024 nr. 1.</p>
+              </article>
+            </section>
+          </body>
+        </html>
+        """,
+        encoding="utf-8",
+    )
+
+    articles = list(parse_xml_file(sample))
+    assert len(articles) == 2
+    by_source = {a.source_anchor_id: a for a in articles}
+    assert by_source["nl-20990101-003_kapittel-1_art_0"].doc_type == "provision"
+    assert by_source["nl-20990101-003_kapittel-1_art_1"].doc_type == "editorial_note"
+
+
+def test_header_article_count_matches_parser_output(tmp_path):
+    """Header article_count should use the same extraction logic as parse_xml_file."""
+    sample = tmp_path / "sf-20990101-004.xml"
+    sample.write_text(
+        """
+        <html>
+          <head><title>Header parity test</title></head>
+          <body>
+            <header>
+              <dl>
+                <dd class="title">Header parity test</dd>
+                <dd class="dokid">SF/forskrift/2099-01-01-4</dd>
+              </dl>
+            </header>
+            <article id="kapittel-1-ledd-1"><p>Ledd 1.</p></article>
+            <article id="kapittel-1-ledd-2"><p>Ledd 2.</p></article>
+          </body>
+        </html>
+        """,
+        encoding="utf-8",
+    )
+
+    parsed = list(parse_xml_file(sample))
+    header = parse_law_header(sample)
+    assert header["article_count"] == len(parsed)
 
 
 # --- Integration tests with real law files ---
@@ -235,6 +361,7 @@ class TestParseHusleieloven:
         articles = list(parse_xml_file(HUSLEIELOVEN_PATH))
         for art in articles:
             assert art.url.startswith("https://lovdata.no/lov/")
+            assert "/lov/1999-03-26-17#" in art.url
 
     def test_canonical_article_ids_from_heading(self):
         """Article IDs should follow visible § numbering (canonical IDs)."""
@@ -273,7 +400,7 @@ class TestParseLawHeader:
 
     def test_header_law_ref(self):
         header = parse_law_header(HUSLEIELOVEN_PATH)
-        assert header["law_ref"] == "lov/1999-03-26-017"
+        assert header["law_ref"] == "lov/1999-03-26-17"
 
 
 @pytest.mark.skipif(not FORBRUKERKJOP_PATH.exists(), reason="Forbrukerkjopsloven data file not available")

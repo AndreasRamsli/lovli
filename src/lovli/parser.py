@@ -14,7 +14,15 @@ logger = logging.getLogger(__name__)
 LOVDATA_BASE_URL = "https://lovdata.no"
 _PARAGRAPH_REF_RE = re.compile(r"§\s*(\d+[A-Za-z]?)\s*-\s*(\d+\s*[A-Za-z]?)")
 _EDITORIAL_NOTE_RE = re.compile(
-    r"^\s*(Endret ved lov|Tilføyd ved lov|Opphevet ved lov|Tilføyet ved lov)",
+    r"^\s*(?:\d+\s+)?(Endret ved (?:lov|forskrift)|Tilføyd ved (?:lov|forskrift)|Opphevet ved (?:lov|forskrift)|Tilføyet ved (?:lov|forskrift))",
+    flags=re.IGNORECASE,
+)
+_EDITORIAL_CONTEXT_RE = re.compile(
+    r"\b(endret ved|tilføyd ved|tilføyet ved|opphevet ved|ikr\.|i kraft)\b",
+    flags=re.IGNORECASE,
+)
+_CANONICAL_LAW_REF_RE = re.compile(
+    r"(lov|forskrift)/(\d{4}-\d{2}-\d{2})-(\d+)",
     flags=re.IGNORECASE,
 )
 
@@ -75,14 +83,48 @@ def _extract_short_name(soup: BeautifulSoup) -> str | None:
     -> "Husleieloven"
     """
     short_elem = soup.find("dd", class_="titleShort")
-    if not short_elem:
+    if short_elem:
+        text = short_elem.get_text(strip=True)
+        # Split on common separators: " – ", " - ", " — "
+        for sep in (" – ", " — ", " - "):
+            if sep in text:
+                return text.split(sep)[0].strip()
+        return text.strip() or None
+
+    # Fallback for files without titleShort metadata.
+    title_elem = soup.find("dd", class_="title") or soup.find("title")
+    if not title_elem:
         return None
-    text = short_elem.get_text(strip=True)
-    # Split on common separators: " – ", " - ", " — "
-    for sep in (" – ", " — ", " - "):
-        if sep in text:
-            return text.split(sep)[0].strip()
-    return text.strip() or None
+    title_text = title_elem.get_text(strip=True)
+    # "Lov om ... (husleieloven)" -> "husleieloven"
+    paren_match = re.search(r"\(([^)]+)\)", title_text)
+    if paren_match:
+        return paren_match.group(1).strip() or None
+    return title_text.strip() or None
+
+
+def _canonicalize_law_ref(value: str | None) -> str | None:
+    """Return canonical law ref (lov/forskrift/YYYY-MM-DD-N) when possible."""
+    if not value:
+        return None
+    match = _CANONICAL_LAW_REF_RE.search(value.strip())
+    if not match:
+        return None
+
+    prefix, date_part, num_part = match.group(1).lower(), match.group(2), match.group(3)
+    # Normalize leading zeros in law number (017 -> 17).
+    normalized_num = str(int(num_part))
+    return f"{prefix}/{date_part}-{normalized_num}"
+
+
+def _extract_law_ref_from_soup(soup: BeautifulSoup) -> str | None:
+    """Extract canonical law reference from in-file metadata."""
+    dokid_elem = soup.find("dd", class_="dokid")
+    if dokid_elem:
+        canonical = _canonicalize_law_ref(dokid_elem.get_text(strip=True))
+        if canonical:
+            return canonical
+    return None
 
 
 def _extract_cross_references(article_element: Tag, self_law_ref: str) -> list[str]:
@@ -101,6 +143,7 @@ def _extract_cross_references(article_element: Tag, self_law_ref: str) -> list[s
     """
     refs = []
     seen = set()
+    self_law_ref_normalized = _canonicalize_law_ref(self_law_ref)
 
     for a_tag in article_element.find_all("a", href=True):
         href = a_tag.get("href", "")
@@ -111,15 +154,17 @@ def _extract_cross_references(article_element: Tag, self_law_ref: str) -> list[s
         if not (href.startswith("lov/") or href.startswith("forskrift/")):
             continue
 
-        # Exclude self-references (same law)
-        if self_law_ref and href.startswith(self_law_ref):
+        # Exclude self-references (same law), even when numbering differs (e.g. 017 vs 17).
+        href_law_ref = _canonicalize_law_ref(href)
+        if self_law_ref_normalized and href_law_ref == self_law_ref_normalized:
             continue
 
         # Normalize: strip fragment identifiers for deduplication
         base_href = href.split("#")[0] if "#" in href else href
 
-        if base_href not in seen:
-            seen.add(base_href)
+        dedupe_key = _canonicalize_law_ref(base_href) or base_href
+        if dedupe_key not in seen:
+            seen.add(dedupe_key)
             refs.append(base_href)
 
     return refs
@@ -170,17 +215,28 @@ def _classify_doc_type(
     Editorial notes are usually amendment history snippets (e.g. "Endret ved lov...")
     that should stay attached to the same law, but be handled as supplemental context.
     """
-    if "Untitled Article" == title_text:
+    content = article_content or ""
+    leading_content = content[:320]
+    leading_content_lower = leading_content.lower()
+
+    if _EDITORIAL_NOTE_RE.search(leading_content):
         return "editorial_note"
 
-    if _EDITORIAL_NOTE_RE.match(article_content or ""):
+    if title_text and _EDITORIAL_CONTEXT_RE.search(title_text):
         return "editorial_note"
 
     # Fallback IDs indicate nodes without a stable Lovdata anchor in source.
+    # Classify by content signals rather than forcing editorial for all fallback chunks.
     if "_art_" in raw_article_id:
-        return "editorial_note"
+        if _EDITORIAL_CONTEXT_RE.search(leading_content) and "skal lyde" not in leading_content_lower:
+            return "editorial_note"
 
     return "provision"
+
+
+def _is_nested_article_id(raw_article_id: str) -> bool:
+    """Return True for fine-grained nested article IDs."""
+    return "-ledd-" in raw_article_id or "-punkt-" in raw_article_id
 
 
 def _parse_lovdata_html(xml_path: Path) -> Iterator[LegalArticle]:
@@ -218,7 +274,7 @@ def _parse_lovdata_html(xml_path: Path) -> Iterator[LegalArticle]:
 
     # Extract law metadata
     law_id = xml_path.stem
-    law_ref = _extract_law_ref_from_filename(law_id)
+    law_ref = _extract_law_ref_from_soup(soup) or _extract_law_ref_from_filename(law_id)
 
     # Find title - Lovdata uses <dd class="title">
     title_elem = soup.find("dd", class_="title")
@@ -230,25 +286,100 @@ def _parse_lovdata_html(xml_path: Path) -> Iterator[LegalArticle]:
     # Extract short name (e.g. "Husleieloven")
     law_short_name = _extract_short_name(soup)
 
-    # Try hierarchical extraction via <section> elements (chapters)
+    parsed_articles = _collect_articles(
+        soup=soup,
+        law_id=law_id,
+        law_ref=law_ref,
+        law_title_text=law_title_text,
+        law_short_name=law_short_name,
+        xml_path=xml_path,
+        allow_nested_ids=False,
+    )
+
+    if not parsed_articles:
+        logger.info("No coarse articles found in %s; retrying with nested IDs enabled", xml_path)
+        parsed_articles = _collect_articles(
+            soup=soup,
+            law_id=law_id,
+            law_ref=law_ref,
+            law_title_text=law_title_text,
+            law_short_name=law_short_name,
+            xml_path=xml_path,
+            allow_nested_ids=True,
+        )
+
+    if not parsed_articles:
+        logger.warning(f"No articles found in {xml_path}")
+        return
+
+    yield from parsed_articles
+
+
+def _collect_articles(
+    soup: BeautifulSoup,
+    law_id: str,
+    law_ref: str,
+    law_title_text: str,
+    law_short_name: str | None,
+    xml_path: Path,
+    allow_nested_ids: bool,
+) -> list[LegalArticle]:
+    """Collect parsed articles from chapter sections and root-level articles."""
     sections = soup.find_all("section", id=re.compile(r"^kapittel-\d+[a-zA-Z]?$"))
+    all_results: list[LegalArticle] = []
+    seen_source_ids: set[str] = set()
+
+    def add_unique(items: Iterator[LegalArticle]) -> None:
+        for item in items:
+            source_id = item.source_anchor_id or item.article_id
+            if source_id in seen_source_ids:
+                continue
+            seen_source_ids.add(source_id)
+            all_results.append(item)
 
     if sections:
-        # Hierarchical path: iterate sections -> articles
-        yield from _parse_hierarchical(
-            sections, law_id, law_ref, law_title_text, law_short_name, xml_path
+        add_unique(
+            _parse_hierarchical(
+                sections=sections,
+                law_id=law_id,
+                law_ref=law_ref,
+                law_title_text=law_title_text,
+                law_short_name=law_short_name,
+                xml_path=xml_path,
+                allow_nested_ids=allow_nested_ids,
+            )
         )
-    else:
-        # Flat fallback: iterate all articles directly (for laws without chapter structure)
-        articles = soup.find_all("article")
-        if not articles:
-            logger.warning(f"No articles found in {xml_path}")
-            return
 
-        logger.info(f"Found {len(articles)} articles in {law_title_text} (flat structure)")
-        yield from _parse_articles_flat(
-            articles, law_id, law_ref, law_title_text, law_short_name, xml_path
-        )
+        section_article_ids = {id(article) for section in sections for article in section.find_all("article")}
+        root_level_articles = [a for a in soup.find_all("article") if id(a) not in section_article_ids]
+        if root_level_articles:
+            add_unique(
+                _parse_articles_flat(
+                    articles=root_level_articles,
+                    law_id=law_id,
+                    law_ref=law_ref,
+                    law_title_text=law_title_text,
+                    law_short_name=law_short_name,
+                    xml_path=xml_path,
+                    allow_nested_ids=allow_nested_ids,
+                )
+            )
+    else:
+        articles = soup.find_all("article")
+        if articles:
+            add_unique(
+                _parse_articles_flat(
+                    articles=articles,
+                    law_id=law_id,
+                    law_ref=law_ref,
+                    law_title_text=law_title_text,
+                    law_short_name=law_short_name,
+                    xml_path=xml_path,
+                    allow_nested_ids=allow_nested_ids,
+                )
+            )
+
+    return all_results
 
 
 def _parse_hierarchical(
@@ -258,6 +389,7 @@ def _parse_hierarchical(
     law_title_text: str,
     law_short_name: str | None,
     xml_path: Path,
+    allow_nested_ids: bool,
 ) -> Iterator[LegalArticle]:
     """Parse articles from chapter sections with hierarchical metadata."""
     total_count = 0
@@ -278,7 +410,7 @@ def _parse_hierarchical(
         for idx, article in enumerate(articles):
             result = _extract_article(
                 article, idx, law_id, law_ref, law_title_text, law_short_name,
-                chapter_id, chapter_title_clean, xml_path,
+                chapter_id, chapter_title_clean, xml_path, allow_nested_ids,
             )
             if result:
                 total_count += 1
@@ -294,12 +426,13 @@ def _parse_articles_flat(
     law_title_text: str,
     law_short_name: str | None,
     xml_path: Path,
+    allow_nested_ids: bool,
 ) -> Iterator[LegalArticle]:
     """Parse articles without chapter hierarchy (flat structure)."""
     for idx, article in enumerate(articles):
         result = _extract_article(
             article, idx, law_id, law_ref, law_title_text, law_short_name,
-            chapter_id=None, chapter_title=None, xml_path=xml_path,
+            chapter_id=None, chapter_title=None, xml_path=xml_path, allow_nested_ids=allow_nested_ids,
         )
         if result:
             yield result
@@ -315,6 +448,7 @@ def _extract_article(
     chapter_id: str | None,
     chapter_title: str | None,
     xml_path: Path,
+    allow_nested_ids: bool = False,
 ) -> LegalArticle | None:
     """Extract a single LegalArticle from an <article> element."""
     try:
@@ -327,7 +461,7 @@ def _extract_article(
 
         # COARSE CHUNKING: Only index at paragraph level
         # Skip sub-articles like "kapittel-X-paragraf-Y-ledd-Z" or "X-punkt-Y"
-        if "-ledd-" in raw_article_id or "-punkt-" in raw_article_id:
+        if not allow_nested_ids and _is_nested_article_id(raw_article_id):
             return None
 
         # Article title from <h3> element
@@ -421,10 +555,14 @@ def parse_law_header(xml_path: Path) -> dict:
     soup = BeautifulSoup(content, "html.parser", parse_only=header_strainer)
 
     law_id = xml_path.stem
-    law_ref = _extract_law_ref_from_filename(law_id)
+    law_ref = _extract_law_ref_from_soup(soup) or _extract_law_ref_from_filename(law_id)
 
     title_elem = soup.find("dd", class_="title")
-    law_title = title_elem.get_text(strip=True) if title_elem else "Unknown Law"
+    if title_elem:
+        law_title = title_elem.get_text(strip=True)
+    else:
+        title_match = re.search(r"<title>(.*?)</title>", content, flags=re.IGNORECASE | re.DOTALL)
+        law_title = title_match.group(1).strip() if title_match else "Unknown Law"
 
     law_short_name = _extract_short_name(soup)
 
@@ -436,17 +574,9 @@ def parse_law_header(xml_path: Path) -> dict:
     date_elem = soup.find("dd", class_="dateInForce")
     date_in_force = date_elem.get_text(strip=True) if date_elem else None
 
-    # Count chapters and articles using fast regex on raw content
-    chapter_count = len(re.findall(r'<section[^>]+id="kapittel-\d+[a-zA-Z]?"', content))
-    
-    # Count articles: match all <article> tags and extract IDs, excluding sub-articles
-    # This matches both hierarchical (kapittel-X-paragraf-Y) and flat structure articles
-    # Exclude -ledd- and -punkt- sub-articles (same logic as _extract_article)
-    all_article_matches = re.findall(r'<article[^>]+id="([^"]+)"', content)
-    article_count = sum(
-        1 for art_id in all_article_matches
-        if "-ledd-" not in art_id and "-punkt-" not in art_id
-    )
+    parsed_articles = list(parse_xml_file(xml_path))
+    chapter_count = len({a.chapter_id for a in parsed_articles if a.chapter_id})
+    article_count = len(parsed_articles)
 
     return {
         "law_id": law_id,
