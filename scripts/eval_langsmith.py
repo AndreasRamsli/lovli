@@ -30,7 +30,7 @@ load_dotenv(root_dir / ".env")
 
 from lovli.chain import LegalRAGChain
 from lovli.config import Settings, get_settings
-from lovli.eval_utils import validate_questions
+from lovli.eval_utils import infer_negative_type, validate_questions
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -145,21 +145,6 @@ def _matches_expected_source(cited_source: Dict[str, Any], expected_source: Dict
     if not expected_law or not expected_article:
         return False
     return cited_law == expected_law and cited_article.startswith(expected_article)
-
-
-def _infer_negative_type(reference_outputs: Dict[str, Any]) -> str:
-    """Infer negative subtype from explicit field, category, or notes suffix."""
-    explicit = (reference_outputs.get("negative_type") or "").strip().lower()
-    if explicit:
-        return explicit
-    category = (reference_outputs.get("category") or "").strip().lower()
-    if category in {"ambiguity", "offtopic_legal", "offtopic_nonlegal"}:
-        return category
-    notes = (reference_outputs.get("notes") or "")
-    match = re.search(r"negative_type:\s*([a-z_]+)", notes, flags=re.IGNORECASE)
-    if match:
-        return match.group(1).strip().lower()
-    return "unknown"
 
 
 def create_citation_match_evaluator(settings: Settings):
@@ -372,7 +357,7 @@ def create_offtopic_contamination_evaluator():
         answer = outputs.get("answer", "")
         is_gated = outputs.get("is_gated", False)
         no_results = "Beklager, jeg kunne ikke finne informasjon" in answer
-        negative_type = _infer_negative_type(reference_outputs)
+        negative_type = infer_negative_type(reference_outputs)
 
         ok = is_gated or no_results or len(cited_articles) == 0
         return {

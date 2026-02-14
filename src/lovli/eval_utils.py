@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 from typing import Any
 
@@ -92,3 +93,18 @@ def validate_questions(
             len(missing),
             ", ".join(missing[:20]) + (" ..." if len(missing) > 20 else ""),
         )
+
+
+def infer_negative_type(row: dict[str, Any]) -> str:
+    """Infer negative subtype from explicit fields, category, or notes suffix."""
+    explicit = (row.get("negative_type") or "").strip().lower()
+    if explicit:
+        return explicit
+    category = (row.get("category") or "").strip().lower()
+    if category in {"ambiguity", "offtopic_legal", "offtopic_nonlegal"}:
+        return category
+    notes = row.get("notes") or ""
+    match = re.search(r"negative_type:\s*([a-z_]+)", notes, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip().lower()
+    return "unknown"

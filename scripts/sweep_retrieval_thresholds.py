@@ -11,7 +11,6 @@ import json
 import logging
 import math
 import os
-import re
 import sys
 from pathlib import Path
 
@@ -26,7 +25,7 @@ sys.path.insert(0, str(ROOT_DIR / "src"))
 
 from lovli.chain import LegalRAGChain  # noqa: E402
 from lovli.config import get_settings  # noqa: E402
-from lovli.eval_utils import validate_questions  # noqa: E402
+from lovli.eval_utils import infer_negative_type, validate_questions  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -36,6 +35,7 @@ CORE_QUESTION_IDS = {
     "q001", "q002", "q003", "q004", "q005", "q006", "q007", "q008", "q009", "q010",
     "q011", "q012", "q013", "q014", "q015", "q016", "q017", "q018", "q019", "q020",
     "q021", "q022", "q031", "q036", "q037", "q038", "q039", "q040", "q041", "q042", "q045",
+    "q046", "q047", "q048", "q049", "q050",
 }
 
 
@@ -53,23 +53,6 @@ def _matches_expected_source(cited_source: dict, expected_source: dict) -> bool:
     if not expected_law or not expected_article:
         return False
     return cited_law == expected_law and cited_article.startswith(expected_article)
-
-
-def infer_negative_type(row: dict) -> str:
-    """Infer negative subtype from explicit fields or note suffix."""
-    explicit = (row.get("negative_type") or "").strip().lower()
-    if explicit:
-        return explicit
-
-    category = (row.get("category") or "").strip().lower()
-    if category in {"ambiguity", "offtopic_legal", "offtopic_nonlegal"}:
-        return category
-
-    notes = (row.get("notes") or "")
-    match = re.search(r"negative_type:\s*([a-z_]+)", notes, flags=re.IGNORECASE)
-    if match:
-        return match.group(1).strip().lower()
-    return "unknown"
 
 
 def load_questions(path: Path) -> list[dict]:
