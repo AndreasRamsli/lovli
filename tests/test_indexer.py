@@ -3,7 +3,7 @@
 import pytest
 import numpy as np
 from unittest.mock import Mock, patch
-from lovli.indexer import LegalIndexer
+from lovli.indexer import LegalIndexer, _build_point_key, _generate_deterministic_id
 from lovli.parser import LegalArticle
 from lovli.config import Settings
 
@@ -116,3 +116,39 @@ def test_sparse_vector_mismatched_lengths():
     if len(indices) != len(values):
         # This should be caught and handled
         assert True
+
+
+def test_point_id_is_law_aware_for_same_article_id():
+    """Same article_id in different laws must produce different point IDs."""
+    art1 = LegalArticle(
+        article_id="kapittel-1-paragraf-1",
+        title="§ 1-1",
+        content="A",
+        law_id="nl-19990326-017",
+        law_title="Law A",
+    )
+    art2 = LegalArticle(
+        article_id="kapittel-1-paragraf-1",
+        title="§ 1-1",
+        content="B",
+        law_id="nl-20020621-034",
+        law_title="Law B",
+    )
+
+    id1 = _generate_deterministic_id(_build_point_key(art1))
+    id2 = _generate_deterministic_id(_build_point_key(art2))
+    assert id1 != id2
+
+
+def test_point_key_prefers_source_anchor_id():
+    """Point key should use source_anchor_id when available."""
+    art = LegalArticle(
+        article_id="kapittel-9-paragraf-6",
+        title="§ 9-6",
+        content="Oppsigelse",
+        law_id="nl-19990326-017",
+        law_title="Husleieloven",
+        source_anchor_id="kapittel-9-paragraf-7",
+    )
+    key = _build_point_key(art)
+    assert key == "nl-19990326-017::kapittel-9-paragraf-7"

@@ -121,6 +121,42 @@ class TestExtractCrossReferences:
         assert refs == []
 
 
+def test_fallback_source_anchor_id_is_unique_across_chapters(tmp_path):
+    """Fallback source anchors should include chapter scope to avoid collisions."""
+    sample = tmp_path / "nl-20990101-001.xml"
+    sample.write_text(
+        """
+        <html>
+          <body>
+            <dd class="title">Testlov</dd>
+            <section id="kapittel-1">
+              <h2>Kapittel 1. Innledning</h2>
+              <article>
+                <h3>Untitled Article</h3>
+                <p>Endret ved lov ...</p>
+              </article>
+            </section>
+            <section id="kapittel-2">
+              <h2>Kapittel 2. Innledning</h2>
+              <article>
+                <h3>Untitled Article</h3>
+                <p>Endret ved lov ...</p>
+              </article>
+            </section>
+          </body>
+        </html>
+        """,
+        encoding="utf-8",
+    )
+
+    articles = list(parse_xml_file(sample))
+    assert len(articles) == 2
+    source_ids = [a.source_anchor_id for a in articles]
+    assert len(set(source_ids)) == 2
+    assert source_ids[0] == "nl-20990101-001_kapittel-1_art_0"
+    assert source_ids[1] == "nl-20990101-001_kapittel-2_art_0"
+
+
 # --- Integration tests with real law files ---
 
 

@@ -13,20 +13,30 @@ from .parser import LegalArticle
 logger = logging.getLogger(__name__)
 
 
-def _generate_deterministic_id(article_id: str) -> int:
+def _build_point_key(article: LegalArticle) -> str:
+    """
+    Build stable, law-aware key for deterministic Qdrant point IDs.
+
+    Prefer source_anchor_id when available so key reflects source-level identity.
+    """
+    stable_source_id = article.source_anchor_id or article.article_id
+    return f"{article.law_id}::{stable_source_id}"
+
+
+def _generate_deterministic_id(point_key: str) -> int:
     """
     Generate a deterministic int64 ID from article ID string.
 
     Uses SHA-256 hash to avoid collisions while ensuring determinism.
 
     Args:
-        article_id: Unique article identifier
+        point_key: Unique, law-aware point key
 
     Returns:
         int64 ID suitable for Qdrant
     """
     # Use SHA-256 for deterministic hashing
-    hash_bytes = hashlib.sha256(article_id.encode("utf-8")).digest()
+    hash_bytes = hashlib.sha256(point_key.encode("utf-8")).digest()
     # Take first 8 bytes and convert to int64 (unsigned to ensure non-negative)
     return int.from_bytes(hash_bytes[:8], byteorder="big", signed=False) % (2**63)
 
@@ -206,7 +216,7 @@ class LegalIndexer:
         try:
             for article in articles:
                 # Generate deterministic ID
-                point_id = _generate_deterministic_id(article.article_id)
+                point_id = _generate_deterministic_id(_build_point_key(article))
 
                 # Skip duplicates within the current batch
                 if point_id in batch_ids:
@@ -273,7 +283,7 @@ class LegalIndexer:
         # Build Qdrant points
         points = []
         for idx, article in enumerate(batch):
-            point_id = _generate_deterministic_id(article.article_id)
+            point_id = _generate_deterministic_id(_build_point_key(article))
             dense_vector = dense_embeddings[idx].tolist() if idx < len(dense_embeddings) else None
 
             # Prepare sparse vector if available (only with native API)

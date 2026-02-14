@@ -319,7 +319,11 @@ def _extract_article(
     """Extract a single LegalArticle from an <article> element."""
     try:
         # Article ID from the element's id attribute
-        raw_article_id = article.get("id") or f"{law_id}_art_{idx}"
+        raw_article_id = article.get("id")
+        if not raw_article_id:
+            chapter_scope = chapter_id or "flat"
+            # Include chapter scope to avoid collisions when idx resets per section.
+            raw_article_id = f"{law_id}_{chapter_scope}_art_{idx}"
 
         # COARSE CHUNKING: Only index at paragraph level
         # Skip sub-articles like "kapittel-X-paragraf-Y-ledd-Z" or "X-punkt-Y"
