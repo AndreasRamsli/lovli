@@ -130,6 +130,9 @@ def main():
                 "expected_sources": q.get("expected_sources", []),
                 "expects_editorial_context": bool(q.get("expects_editorial_context", False)),
                 "notes": q.get("notes", ""),
+                "category": q.get("category", ""),
+                "case_type": q.get("case_type", ""),
+                "negative_type": q.get("negative_type", ""),
             },
             "metadata": {
                 "id": q.get("id", ""),

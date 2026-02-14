@@ -5,6 +5,7 @@ Evaluates retrieval relevance, citation accuracy, correctness, and groundedness.
 """
 
 import logging
+import json
 import os
 import re
 import sys
@@ -29,6 +30,7 @@ load_dotenv(root_dir / ".env")
 
 from lovli.chain import LegalRAGChain
 from lovli.config import Settings, get_settings
+from lovli.eval_utils import validate_questions
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -452,6 +454,15 @@ def main():
     
     # Dataset name (should match the one created by upload_dataset.py)
     dataset_name = "lovli-eval-questions"
+
+    # Validate local eval labels before running remote evaluation.
+    questions_path = root_dir / "eval" / "questions.jsonl"
+    if not questions_path.exists():
+        logger.error(f"Questions file not found: {questions_path}")
+        sys.exit(1)
+    with open(questions_path, "r", encoding="utf-8") as f:
+        questions = [json.loads(line) for line in f if line.strip()]
+    validate_questions(questions, get_chain())
     
     # Get judge model from settings or use default
     judge_model = getattr(settings, "eval_judge_model", "gpt-4o-mini")
