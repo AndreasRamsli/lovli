@@ -256,6 +256,36 @@ def test_fallback_art_doc_type_uses_content_signals(tmp_path):
     assert by_source["nl-20990101-003_kapittel-1_art_1"].doc_type == "editorial_note"
 
 
+def test_editorial_notes_link_to_preceding_provision(tmp_path):
+    """Editorial notes should inherit linked_provision_id from previous provision."""
+    sample = tmp_path / "nl-20990101-005.xml"
+    sample.write_text(
+        """
+        <html>
+          <body>
+            <dd class="title">Linked editorial test</dd>
+            <section id="kapittel-9">
+              <h2>Kapittel 9. Opphør</h2>
+              <article id="kapittel-9-paragraf-6">
+                <h3>§ 9-6. Oppsigelsesfrist</h3>
+                <p>Oppsigelsesfristen er tre måneder.</p>
+              </article>
+              <article>
+                <p>Endret ved lov 16 jan 2009 nr. 6.</p>
+              </article>
+            </section>
+          </body>
+        </html>
+        """,
+        encoding="utf-8",
+    )
+
+    articles = list(parse_xml_file(sample))
+    provision = next(a for a in articles if a.doc_type == "provision")
+    editorial = next(a for a in articles if a.doc_type == "editorial_note")
+    assert editorial.linked_provision_id == provision.article_id
+
+
 def test_header_article_count_matches_parser_output(tmp_path):
     """Header article_count should use the same extraction logic as parse_xml_file."""
     sample = tmp_path / "sf-20990101-004.xml"

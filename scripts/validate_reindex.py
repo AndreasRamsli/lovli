@@ -5,6 +5,7 @@ Validate post-reindex metadata completeness and retrieval behavior.
 Checks:
 - metadata.doc_type exists on all indexed points
 - doc_type distribution sanity (provision/editorial_note)
+- linked_provision_id coverage for editorial_note payloads
 - retrieval smoke checks keep provisions ahead of editorial notes
 
 Usage:
@@ -65,6 +66,7 @@ def scan_doc_type_metrics(client: QdrantClient, collection_name: str) -> dict[st
     missing_doc_type = 0
     provision_count = 0
     editorial_note_count = 0
+    editorial_with_linkage = 0
     other_doc_type_count = 0
 
     while True:
@@ -89,6 +91,8 @@ def scan_doc_type_metrics(client: QdrantClient, collection_name: str) -> dict[st
                 provision_count += 1
             elif doc_type == "editorial_note":
                 editorial_note_count += 1
+                if (metadata.get("linked_provision_id") or "").strip():
+                    editorial_with_linkage += 1
             else:
                 other_doc_type_count += 1
 
@@ -100,6 +104,7 @@ def scan_doc_type_metrics(client: QdrantClient, collection_name: str) -> dict[st
         "missing_doc_type": missing_doc_type,
         "provision_count": provision_count,
         "editorial_note_count": editorial_note_count,
+        "editorial_with_linkage": editorial_with_linkage,
         "other_doc_type_count": other_doc_type_count,
     }
 
@@ -162,6 +167,16 @@ def main() -> None:
     logger.info("missing_doc_type=%s", metrics["missing_doc_type"])
     logger.info("provision_count=%s", metrics["provision_count"])
     logger.info("editorial_note_count=%s", metrics["editorial_note_count"])
+    if metrics["editorial_note_count"] > 0:
+        coverage = metrics["editorial_with_linkage"] / metrics["editorial_note_count"]
+        logger.info(
+            "editorial_linkage_coverage=%s/%s (%.2f%%)",
+            metrics["editorial_with_linkage"],
+            metrics["editorial_note_count"],
+            coverage * 100.0,
+        )
+    else:
+        logger.info("editorial_linkage_coverage=0/0 (no editorial notes)")
     logger.info("other_doc_type_count=%s", metrics["other_doc_type_count"])
 
     if args.with_smoke:

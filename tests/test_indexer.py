@@ -171,4 +171,5 @@ def test_ensure_payload_indexes_targets_metadata_fields():
         "metadata.law_id",
         "metadata.chapter_id",
         "metadata.doc_type",
+        "metadata.linked_provision_id",
     ]

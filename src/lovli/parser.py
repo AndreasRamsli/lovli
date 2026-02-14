@@ -43,6 +43,7 @@ class LegalArticle:
     url: str | None = None
     source_anchor_id: str | None = None
     doc_type: str = "provision"
+    linked_provision_id: str | None = None
 
 
 def _extract_law_ref_from_filename(filename: str) -> str:
@@ -395,6 +396,7 @@ def _parse_hierarchical(
     total_count = 0
 
     for section in sections:
+        last_provision_article_id: str | None = None
         chapter_id = section.get("id", "")
         h2 = section.find("h2")
         chapter_title = h2.get_text(strip=True) if h2 else None
@@ -413,6 +415,10 @@ def _parse_hierarchical(
                 chapter_id, chapter_title_clean, xml_path, allow_nested_ids,
             )
             if result:
+                if result.doc_type == "editorial_note":
+                    result.linked_provision_id = last_provision_article_id
+                else:
+                    last_provision_article_id = result.article_id
                 total_count += 1
                 yield result
 
@@ -429,12 +435,17 @@ def _parse_articles_flat(
     allow_nested_ids: bool,
 ) -> Iterator[LegalArticle]:
     """Parse articles without chapter hierarchy (flat structure)."""
+    last_provision_article_id: str | None = None
     for idx, article in enumerate(articles):
         result = _extract_article(
             article, idx, law_id, law_ref, law_title_text, law_short_name,
             chapter_id=None, chapter_title=None, xml_path=xml_path, allow_nested_ids=allow_nested_ids,
         )
         if result:
+            if result.doc_type == "editorial_note":
+                result.linked_provision_id = last_provision_article_id
+            else:
+                last_provision_article_id = result.article_id
             yield result
 
 

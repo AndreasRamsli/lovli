@@ -25,7 +25,10 @@ sys.path.insert(0, str(ROOT_DIR / "src"))
 
 from lovli.chain import LegalRAGChain, _infer_doc_type  # noqa: E402
 from lovli.config import get_settings  # noqa: E402
-from lovli.editorial import collect_provision_law_chapter_pairs  # noqa: E402
+from lovli.editorial import (  # noqa: E402
+    collect_provision_article_pairs,
+    collect_provision_law_chapter_pairs,
+)
 from lovli.eval_utils import infer_negative_type, validate_questions  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -141,8 +144,11 @@ def precompute_candidates(
                     }
                 )
 
-        law_chapter_pairs = collect_provision_law_chapter_pairs(candidates)
-        editorial_docs = chain._fetch_editorial_for_chapters(law_chapter_pairs)
+        provision_pairs = collect_provision_article_pairs(candidates)
+        editorial_docs = chain._fetch_editorial_for_provisions(provision_pairs)
+        if not editorial_docs:
+            law_chapter_pairs = collect_provision_law_chapter_pairs(candidates)
+            editorial_docs = chain._fetch_editorial_for_chapters(law_chapter_pairs, per_chapter_cap=2)
         editorial_candidates = []
         for doc in editorial_docs:
             metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
@@ -246,14 +252,15 @@ def evaluate_combo(
         # Simulate runtime doc-type prioritization and editorial budgeting.
         provisions = [c for c in kept if c.get("doc_type") != "editorial_note"]
         editorial = [c for c in kept if c.get("doc_type") == "editorial_note"]
-        editorial_budget = chain._compute_editorial_budget(total_docs=len(kept), retrieval_query=question)
+        editorial_budget = chain._compute_editorial_budget(total_docs=len(provisions), retrieval_query=question)
         kept = provisions + editorial[:editorial_budget]
 
         scores = [c["score"] for c in kept]
-        cited_ids = [c["article_id"] for c in kept if c.get("article_id")]
+        provision_kept = [c for c in kept if c.get("doc_type") != "editorial_note"]
+        cited_ids = [c["article_id"] for c in provision_kept if c.get("article_id")]
         cited_sources = [
             {"law_id": c.get("law_id", ""), "article_id": c.get("article_id", "")}
-            for c in kept
+            for c in provision_kept
             if c.get("article_id")
         ]
         cited_editorial = any(

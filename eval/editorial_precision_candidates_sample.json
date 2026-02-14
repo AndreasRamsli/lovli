@@ -1,0 +1,55 @@
+[
+  {
+    "id": "q001",
+    "question": "Hvor mye kan utleier kreve i depositum?",
+    "expected_articles": ["kapittel-3-paragraf-5"],
+    "expected_sources": [{"law_id": "nl-19990326-017", "article_id": "kapittel-3-paragraf-5"}],
+    "expects_editorial_context": false,
+    "case_type": "single_article",
+    "negative_type": "unknown",
+    "is_core": true,
+    "candidates": [
+      {"law_id": "nl-19990326-017", "article_id": "kapittel-3-paragraf-5", "chapter_id": "kapittel-3", "doc_type": "provision", "score": 0.85},
+      {"law_id": "nl-19990326-017", "article_id": "kapittel-3-paragraf-6", "chapter_id": "kapittel-3", "doc_type": "provision", "score": 0.55},
+      {"law_id": "nl-19990326-017", "article_id": "kapittel-4-paragraf-2", "chapter_id": "kapittel-4", "doc_type": "provision", "score": 0.45}
+    ],
+    "editorial_candidates": [
+      {"law_id": "nl-19990326-017", "article_id": "nl-19990326-017_kapittel-3_art_5", "chapter_id": "kapittel-3", "doc_type": "editorial_note", "score": 0.0},
+      {"law_id": "nl-19990326-017", "article_id": "nl-19990326-017_kapittel-3_art_6", "chapter_id": "kapittel-3", "doc_type": "editorial_note", "score": 0.0}
+    ]
+  },
+  {
+    "id": "q003",
+    "question": "Hva er oppsigelsestiden for en vanlig leilighet?",
+    "expected_articles": ["kapittel-9-paragraf-6"],
+    "expected_sources": [{"law_id": "nl-19990326-017", "article_id": "kapittel-9-paragraf-6"}],
+    "expects_editorial_context": true,
+    "case_type": "single_article",
+    "negative_type": "unknown",
+    "is_core": true,
+    "candidates": [
+      {"law_id": "nl-19990326-017", "article_id": "kapittel-9-paragraf-6", "chapter_id": "kapittel-9", "doc_type": "provision", "score": 0.92},
+      {"law_id": "nl-19990326-017", "article_id": "kapittel-9-paragraf-7", "chapter_id": "kapittel-9", "doc_type": "provision", "score": 0.62}
+    ],
+    "editorial_candidates": [
+      {"law_id": "nl-19990326-017", "article_id": "nl-19990326-017_kapittel-9_art_6", "chapter_id": "kapittel-9", "doc_type": "editorial_note", "score": 0.0},
+      {"law_id": "nl-19990326-017", "article_id": "nl-19990326-017_kapittel-9_art_7", "chapter_id": "kapittel-9", "doc_type": "editorial_note", "score": 0.0},
+      {"law_id": "nl-19990326-017", "article_id": "nl-19990326-017_kapittel-9_art_8", "chapter_id": "kapittel-9", "doc_type": "editorial_note", "score": 0.0}
+    ]
+  },
+  {
+    "id": "q021",
+    "question": "Hva er reglene?",
+    "expected_articles": [],
+    "expected_sources": [],
+    "expects_editorial_context": false,
+    "case_type": "negative",
+    "negative_type": "ambiguity",
+    "is_core": true,
+    "candidates": [
+      {"law_id": "nl-19990326-017", "article_id": "kapittel-9-paragraf-6", "chapter_id": "kapittel-9", "doc_type": "provision", "score": 0.42},
+      {"law_id": "nl-19990326-017", "article_id": "kapittel-3-paragraf-5", "chapter_id": "kapittel-3", "doc_type": "provision", "score": 0.40}
+    ],
+    "editorial_candidates": []
+  }
+]

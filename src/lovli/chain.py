@@ -16,7 +16,11 @@ from sentence_transformers import CrossEncoder
 
 from .catalog import load_catalog
 from .config import Settings, get_settings
-from .editorial import collect_provision_law_chapter_pairs, dedupe_by_law_article
+from .editorial import (
+    collect_provision_article_pairs,
+    collect_provision_law_chapter_pairs,
+    dedupe_by_law_article,
+)
 
 logger = logging.getLogger(__name__)
 MAX_QUESTION_LENGTH = 1000
@@ -296,8 +300,78 @@ Kontekst fra lovtekster:
 
         return min(hard_max, max(0, budget))
 
+    def _fetch_editorial_for_provisions(
+        self,
+        provision_pairs: list[tuple[str, str]],
+        per_provision_cap: int = 3,
+    ) -> list:
+        """Fetch editorial notes linked directly to retrieved provisions."""
+        if not provision_pairs:
+            return []
+
+        client = getattr(self.vectorstore, "client", None)
+        if client is None:
+            return []
+
+        editorial_docs: list = []
+        for law_id, article_id in provision_pairs:
+            try:
+                offset = None
+                provision_docs: list = []
+                while True:
+                    points, offset = client.scroll(
+                        collection_name=self.settings.qdrant_collection_name,
+                        scroll_filter=qdrant_models.Filter(
+                            must=[
+                                qdrant_models.FieldCondition(
+                                    key="metadata.law_id",
+                                    match=qdrant_models.MatchValue(value=law_id),
+                                ),
+                                qdrant_models.FieldCondition(
+                                    key="metadata.linked_provision_id",
+                                    match=qdrant_models.MatchValue(value=article_id),
+                                ),
+                                qdrant_models.FieldCondition(
+                                    key="metadata.doc_type",
+                                    match=qdrant_models.MatchValue(value="editorial_note"),
+                                ),
+                            ]
+                        ),
+                        limit=128,
+                        offset=offset,
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+                    for point in points:
+                        payload = getattr(point, "payload", {}) or {}
+                        metadata = payload.get("metadata", {}) or {}
+                        if _infer_doc_type(metadata) != "editorial_note":
+                            continue
+                        provision_docs.append(
+                            Document(
+                                page_content=payload.get("page_content", ""),
+                                metadata=metadata,
+                            )
+                        )
+                    if offset is None:
+                        break
+                provision_docs.sort(
+                    key=lambda d: (
+                        d.metadata.get("source_anchor_id", "") or d.metadata.get("article_id", ""),
+                        d.metadata.get("article_id", ""),
+                    )
+                )
+                editorial_docs.extend(provision_docs[:per_provision_cap])
+            except Exception as exc:
+                logger.warning(
+                    "Skipping linked editorial fetch (missing payload indexes or filter unsupported): %s",
+                    exc,
+                )
+                return []
+        return dedupe_by_law_article(editorial_docs)
+
     def _fetch_editorial_for_chapters(
-        self, law_chapter_pairs: list[tuple[str, str]], per_chapter_cap: int = 6
+        self, law_chapter_pairs: list[tuple[str, str]], per_chapter_cap: int = 2
     ) -> list:
         """
         Fetch editorial notes for retrieved provision chapters.
@@ -371,6 +445,25 @@ Kontekst fra lovtekster:
 
         return dedupe_by_law_article(editorial_docs)
 
+    def _inject_editorial_and_prioritize(
+        self, docs: list, scores: list[float], retrieval_query: str
+    ) -> tuple[list, list[float]]:
+        """Fetch editorial notes for provisions, append them to docs, and apply budget prioritization."""
+        if not docs:
+            return docs, scores
+
+        provision_pairs = collect_provision_article_pairs(docs)
+        editorial_docs = self._fetch_editorial_for_provisions(provision_pairs)
+        if not editorial_docs:
+            law_chapter_pairs = collect_provision_law_chapter_pairs(docs)
+            editorial_docs = self._fetch_editorial_for_chapters(law_chapter_pairs, per_chapter_cap=2)
+        if editorial_docs:
+            n_provisions = len(docs)
+            docs = list(docs) + list(editorial_docs)
+            if scores and len(scores) == n_provisions:
+                scores = list(scores) + [0.0] * len(editorial_docs)
+        return self._prioritize_doc_types(docs, scores, retrieval_query=retrieval_query)
+
     def _prioritize_doc_types(
         self, docs: list, scores: list[float], retrieval_query: str
     ) -> tuple[list, list[float]]:
@@ -393,7 +486,7 @@ Kontekst fra lovtekster:
                 provisions.append((doc, score))
 
         editorial_budget = self._compute_editorial_budget(
-            total_docs=len(docs),
+            total_docs=len(provisions),
             retrieval_query=retrieval_query,
         )
         selected = provisions + editorial[:editorial_budget]
@@ -685,24 +778,14 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
         if self.reranker and docs:
             docs, scores = self._rerank(retrieval_query, docs, top_k=self.settings.retrieval_k)
             docs, scores = self._apply_reranker_doc_filter(docs, scores)
-            law_chapter_pairs = collect_provision_law_chapter_pairs(docs)
-            editorial_docs = self._fetch_editorial_for_chapters(law_chapter_pairs)
-            if editorial_docs:
-                docs = list(docs) + list(editorial_docs)
-                editorial_scores = [0.0] * len(editorial_docs)
-                scores = list(scores) + editorial_scores
-            docs, scores = self._prioritize_doc_types(docs, scores, retrieval_query=retrieval_query)
+            docs, scores = self._inject_editorial_and_prioritize(docs, scores, retrieval_query=retrieval_query)
             top_score = scores[0] if scores else None
             if top_score is not None:
                 logger.debug(f"Reranked {len(docs)} documents, top score: {top_score:.3f}")
             else:
                 logger.debug(f"Reranking returned no scores for {len(docs)} documents")
         elif docs:
-            law_chapter_pairs = collect_provision_law_chapter_pairs(docs)
-            editorial_docs = self._fetch_editorial_for_chapters(law_chapter_pairs)
-            if editorial_docs:
-                docs = list(docs) + list(editorial_docs)
-            docs, scores = self._prioritize_doc_types(docs, scores, retrieval_query=retrieval_query)
+            docs, scores = self._inject_editorial_and_prioritize(docs, scores, retrieval_query=retrieval_query)
         
         sources = self._extract_sources(docs, include_content=True)
         return sources, top_score, scores

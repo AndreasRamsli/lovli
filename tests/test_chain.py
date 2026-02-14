@@ -360,8 +360,8 @@ def test_prioritize_doc_types_no_provision_edge_case(mock_settings):
             scores,
             retrieval_query="Hva står i loven?",
         )
-        assert [d.metadata["article_id"] for d in selected_docs] == ["e-1", "e-2"]
-        assert selected_scores == [0.8, 0.7]
+        assert selected_docs == []
+        assert selected_scores == []
 
 
 def test_prioritize_doc_types_no_editorial_edge_case(mock_settings):
@@ -400,6 +400,21 @@ def test_fetch_editorial_for_chapters_fallback_on_filter_error(mock_settings):
         assert docs == []
 
 
+def test_fetch_editorial_for_provisions_fallback_on_filter_error(mock_settings):
+    """Linked editorial fetch should fail open when filtered scroll is unsupported."""
+    with patch('lovli.chain.QdrantVectorStore') as mock_vs, \
+         patch('lovli.chain.HuggingFaceEmbeddings'), \
+         patch('lovli.chain.ChatOpenAI'), \
+         patch('lovli.chain.QdrantClient'):
+        vectorstore = MagicMock()
+        vectorstore.client = MagicMock()
+        vectorstore.client.scroll.side_effect = Exception("Index required but not found")
+        mock_vs.return_value = vectorstore
+        chain = LegalRAGChain(mock_settings)
+        docs = chain._fetch_editorial_for_provisions([("nl-19990326-017", "kapittel-9-paragraf-6")])
+        assert docs == []
+
+
 def test_retrieve_injects_editorial_docs_before_prioritize(mock_settings):
     """Non-reranker path should inject fetched editorial docs before prioritization."""
     mock_settings.reranker_enabled = False
@@ -430,12 +445,12 @@ def test_retrieve_injects_editorial_docs_before_prioritize(mock_settings):
                 "doc_type": "editorial_note",
             }
         )
-        chain._fetch_editorial_for_chapters = MagicMock(return_value=[editorial_doc])
+        chain._fetch_editorial_for_provisions = MagicMock(return_value=[editorial_doc])
         chain._extract_sources = MagicMock(return_value=[])
         chain._prioritize_doc_types = MagicMock(side_effect=lambda docs, scores, retrieval_query: (docs, scores))
 
         chain.retrieve("Hva er oppsigelsestiden?")
 
-        assert chain._fetch_editorial_for_chapters.called
+        assert chain._fetch_editorial_for_provisions.called
         prioritized_docs = chain._prioritize_doc_types.call_args.args[0]
         assert len(prioritized_docs) == 2

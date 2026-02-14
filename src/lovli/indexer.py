@@ -200,6 +200,7 @@ class LegalIndexer:
             "metadata.law_id",
             "metadata.chapter_id",
             "metadata.doc_type",
+            "metadata.linked_provision_id",
         ]
         for field_name in fields:
             try:
@@ -341,6 +342,7 @@ class LegalIndexer:
                         "chapter_title": article.chapter_title,
                         "source_anchor_id": article.source_anchor_id,
                         "doc_type": article.doc_type,
+                        "linked_provision_id": article.linked_provision_id,
                         "cross_references": article.cross_references or [],
                         "url": article.url,
                     },

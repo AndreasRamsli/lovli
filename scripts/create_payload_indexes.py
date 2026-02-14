@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Ensure Qdrant payload indexes for metadata.law_id/chapter_id/doc_type."
+        description="Ensure Qdrant payload indexes for metadata.law_id/chapter_id/doc_type/linked_provision_id."
     )
     parser.add_argument(
         "--collection",
