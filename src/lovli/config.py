@@ -86,14 +86,14 @@ class Settings(BaseSettings):
         description="Enable cross-encoder reranking",
     )
     reranker_confidence_threshold: float = Field(
-        default=0.4,
+        default=0.45,
         ge=0.0,
         le=1.0,
         description="Minimum sigmoid-normalized reranker score [0, 1] for confidence gating. "
         "Documents below this threshold trigger a 'no confident answer' response.",
     )
     reranker_min_doc_score: float = Field(
-        default=0.3,
+        default=0.35,
         ge=0.0,
         le=1.0,
         description="Minimum per-document reranker score required to keep a document "
