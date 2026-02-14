@@ -189,6 +189,31 @@ class LegalIndexer:
         )
         logger.info(f"Collection {name} created successfully (payloads on disk)")
 
+    def ensure_payload_indexes(self, collection_name: str | None = None) -> None:
+        """
+        Ensure payload keyword indexes needed for filtering are present.
+
+        This operation is safe to run repeatedly.
+        """
+        name = collection_name or self.settings.qdrant_collection_name
+        fields = [
+            "metadata.law_id",
+            "metadata.chapter_id",
+            "metadata.doc_type",
+        ]
+        for field_name in fields:
+            try:
+                self.client.create_payload_index(
+                    collection_name=name,
+                    field_name=field_name,
+                    field_schema="keyword",
+                    wait=True,
+                )
+                logger.info("Ensured payload index: %s", field_name)
+            except Exception as exc:
+                # Keep this idempotent; if index already exists or API differs, continue.
+                logger.warning("Failed ensuring payload index %s: %s", field_name, exc)
+
     def index_articles(self, articles: Iterator[LegalArticle]) -> int:
         """
         Index a batch of legal articles into Qdrant.

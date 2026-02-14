@@ -98,6 +98,7 @@ def main():
     # Create or recreate collection
     collection_name = indexer.settings.qdrant_collection_name
     indexer.create_collection(collection_name=collection_name, recreate=args.recreate)
+    indexer.ensure_payload_indexes(collection_name=collection_name)
 
     # Index each file
     total_articles = 0

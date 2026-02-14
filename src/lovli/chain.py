@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, Any, Iterator, Tuple
 from langchain_qdrant import QdrantVectorStore, RetrievalMode
 from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from qdrant_client import QdrantClient
@@ -15,6 +16,7 @@ from sentence_transformers import CrossEncoder
 
 from .catalog import load_catalog
 from .config import Settings, get_settings
+from .editorial import collect_provision_law_chapter_pairs, dedupe_by_law_article
 
 logger = logging.getLogger(__name__)
 MAX_QUESTION_LENGTH = 1000
@@ -293,6 +295,81 @@ Kontekst fra lovtekster:
             budget += self.settings.editorial_history_intent_boost
 
         return min(hard_max, max(0, budget))
+
+    def _fetch_editorial_for_chapters(
+        self, law_chapter_pairs: list[tuple[str, str]], per_chapter_cap: int = 6
+    ) -> list:
+        """
+        Fetch editorial notes for retrieved provision chapters.
+
+        Falls back to empty results when filtered payload search is unavailable
+        (for example missing payload indexes on cloud collections).
+        """
+        if not law_chapter_pairs:
+            return []
+
+        client = getattr(self.vectorstore, "client", None)
+        if client is None:
+            return []
+
+        editorial_docs: list = []
+        for law_id, chapter_id in law_chapter_pairs:
+            try:
+                offset = None
+                chapter_docs: list = []
+                while True:
+                    points, offset = client.scroll(
+                        collection_name=self.settings.qdrant_collection_name,
+                        scroll_filter=qdrant_models.Filter(
+                            must=[
+                                qdrant_models.FieldCondition(
+                                    key="metadata.law_id",
+                                    match=qdrant_models.MatchValue(value=law_id),
+                                ),
+                                qdrant_models.FieldCondition(
+                                    key="metadata.chapter_id",
+                                    match=qdrant_models.MatchValue(value=chapter_id),
+                                ),
+                                qdrant_models.FieldCondition(
+                                    key="metadata.doc_type",
+                                    match=qdrant_models.MatchValue(value="editorial_note"),
+                                ),
+                            ]
+                        ),
+                        limit=128,
+                        offset=offset,
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+                    for point in points:
+                        payload = getattr(point, "payload", {}) or {}
+                        metadata = payload.get("metadata", {}) or {}
+                        if _infer_doc_type(metadata) != "editorial_note":
+                            continue
+                        chapter_docs.append(
+                            Document(
+                                page_content=payload.get("page_content", ""),
+                                metadata=metadata,
+                            )
+                        )
+                    if offset is None:
+                        break
+                # Deterministic ordering and chapter-level cap to avoid flooding.
+                chapter_docs.sort(
+                    key=lambda d: (
+                        d.metadata.get("source_anchor_id", "") or d.metadata.get("article_id", ""),
+                        d.metadata.get("article_id", ""),
+                    )
+                )
+                editorial_docs.extend(chapter_docs[:per_chapter_cap])
+            except Exception as exc:
+                logger.warning(
+                    "Skipping editorial injection (missing payload indexes or filter unsupported): %s",
+                    exc,
+                )
+                return []
+
+        return dedupe_by_law_article(editorial_docs)
 
     def _prioritize_doc_types(
         self, docs: list, scores: list[float], retrieval_query: str
@@ -608,6 +685,12 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
         if self.reranker and docs:
             docs, scores = self._rerank(retrieval_query, docs, top_k=self.settings.retrieval_k)
             docs, scores = self._apply_reranker_doc_filter(docs, scores)
+            law_chapter_pairs = collect_provision_law_chapter_pairs(docs)
+            editorial_docs = self._fetch_editorial_for_chapters(law_chapter_pairs)
+            if editorial_docs:
+                docs = list(docs) + list(editorial_docs)
+                editorial_scores = [0.0] * len(editorial_docs)
+                scores = list(scores) + editorial_scores
             docs, scores = self._prioritize_doc_types(docs, scores, retrieval_query=retrieval_query)
             top_score = scores[0] if scores else None
             if top_score is not None:
@@ -615,6 +698,10 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             else:
                 logger.debug(f"Reranking returned no scores for {len(docs)} documents")
         elif docs:
+            law_chapter_pairs = collect_provision_law_chapter_pairs(docs)
+            editorial_docs = self._fetch_editorial_for_chapters(law_chapter_pairs)
+            if editorial_docs:
+                docs = list(docs) + list(editorial_docs)
             docs, scores = self._prioritize_doc_types(docs, scores, retrieval_query=retrieval_query)
         
         sources = self._extract_sources(docs, include_content=True)

@@ -152,3 +152,23 @@ def test_point_key_prefers_source_anchor_id():
     )
     key = _build_point_key(art)
     assert key == "nl-19990326-017::kapittel-9-paragraf-7"
+
+
+def test_ensure_payload_indexes_targets_metadata_fields():
+    """Indexer should ensure payload indexes for law/chapter/doc_type metadata."""
+    idx = LegalIndexer.__new__(LegalIndexer)
+    idx.settings = Mock()
+    idx.settings.qdrant_collection_name = "test_collection"
+    idx.client = Mock()
+
+    idx.ensure_payload_indexes()
+
+    fields = [
+        call.kwargs["field_name"]
+        for call in idx.client.create_payload_index.call_args_list
+    ]
+    assert fields == [
+        "metadata.law_id",
+        "metadata.chapter_id",
+        "metadata.doc_type",
+    ]

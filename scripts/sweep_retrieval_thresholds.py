@@ -23,8 +23,9 @@ except ImportError:  # pragma: no cover - optional in some environments
 ROOT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT_DIR / "src"))
 
-from lovli.chain import LegalRAGChain  # noqa: E402
+from lovli.chain import LegalRAGChain, _infer_doc_type  # noqa: E402
 from lovli.config import get_settings  # noqa: E402
+from lovli.editorial import collect_provision_law_chapter_pairs  # noqa: E402
 from lovli.eval_utils import infer_negative_type, validate_questions  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -134,10 +135,26 @@ def precompute_candidates(
                     {
                         "law_id": metadata.get("law_id", ""),
                         "article_id": metadata.get("article_id", ""),
-                        "doc_type": metadata.get("doc_type", "provision"),
+                        "chapter_id": metadata.get("chapter_id", ""),
+                        "doc_type": _infer_doc_type(metadata),
                         "score": score,
                     }
                 )
+
+        law_chapter_pairs = collect_provision_law_chapter_pairs(candidates)
+        editorial_docs = chain._fetch_editorial_for_chapters(law_chapter_pairs)
+        editorial_candidates = []
+        for doc in editorial_docs:
+            metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+            editorial_candidates.append(
+                {
+                    "law_id": metadata.get("law_id", ""),
+                    "article_id": metadata.get("article_id", ""),
+                    "chapter_id": metadata.get("chapter_id", ""),
+                    "doc_type": _infer_doc_type(metadata),
+                    "score": 0.0,
+                }
+            )
 
         cached.append(
             {
@@ -150,6 +167,7 @@ def precompute_candidates(
                 "negative_type": infer_negative_type(row),
                 "is_core": row.get("id") in CORE_QUESTION_IDS,
                 "candidates": candidates,
+                "editorial_candidates": editorial_candidates,
             }
         )
     return cached
@@ -207,6 +225,7 @@ def evaluate_combo(
         expected = set(row.get("expected_articles", []))
         expected_sources = row.get("expected_sources", []) or []
         candidates = row.get("candidates", [])
+        editorial_candidates = row.get("editorial_candidates", [])
         question = row.get("question", "")
         case_type = row.get("case_type", "single_article")
         negative_type = row.get("negative_type", "unknown")
@@ -221,10 +240,12 @@ def evaluate_combo(
         kept = [c for c in ranked if c["score"] >= min_doc_score]
         if len(kept) < min(min_sources, len(ranked)):
             kept = ranked[: min(min_sources, len(ranked))]
+        if editorial_candidates:
+            kept = list(kept) + list(editorial_candidates)
 
         # Simulate runtime doc-type prioritization and editorial budgeting.
-        provisions = [c for c in kept if c.get("doc_type", "provision") != "editorial_note"]
-        editorial = [c for c in kept if c.get("doc_type", "provision") == "editorial_note"]
+        provisions = [c for c in kept if c.get("doc_type") != "editorial_note"]
+        editorial = [c for c in kept if c.get("doc_type") == "editorial_note"]
         editorial_budget = chain._compute_editorial_budget(total_docs=len(kept), retrieval_query=question)
         kept = provisions + editorial[:editorial_budget]
 
@@ -236,7 +257,7 @@ def evaluate_combo(
             if c.get("article_id")
         ]
         cited_editorial = any(
-            (c.get("doc_type", "provision") == "editorial_note")
+            c.get("doc_type") == "editorial_note"
             for c in kept
         )
         top_score = scores[0] if scores else None
@@ -480,6 +501,7 @@ def evaluate_combo(
 def apply_combo_to_chain(
     chain: LegalRAGChain,
     retrieval_k_initial: int,
+    retrieval_k: int,
     confidence: float,
     min_doc: float,
     min_gap: float,
@@ -487,6 +509,7 @@ def apply_combo_to_chain(
 ) -> None:
     """Apply sweep parameters to an existing chain instance."""
     chain.settings.retrieval_k_initial = retrieval_k_initial
+    chain.settings.retrieval_k = retrieval_k
     chain.settings.reranker_confidence_threshold = confidence
     chain.settings.reranker_min_doc_score = min_doc
     chain.settings.reranker_ambiguity_min_gap = min_gap
@@ -511,8 +534,9 @@ def main() -> None:
     settings = get_settings()
 
     retrieval_k_initial_values = [15, 20]
+    retrieval_k_values = [3, 5]
     confidence_values = [0.35, 0.45]
-    min_doc_values = [0.25, 0.35]
+    min_doc_values = [0.35, 0.45, 0.55]
     min_gap_values = [0.05, 0.10]
     top_score_ceiling_values = [0.60, 0.70]
 
@@ -528,15 +552,16 @@ def main() -> None:
     cached_candidates = precompute_candidates(chain, questions, max_k_initial=max_k_initial)
 
     rows: list[dict] = []
-    for retrieval_k_initial, confidence, min_doc, min_gap, top_score_ceiling in itertools.product(
+    for retrieval_k_initial, retrieval_k, confidence, min_doc, min_gap, top_score_ceiling in itertools.product(
         retrieval_k_initial_values,
+        retrieval_k_values,
         confidence_values,
         min_doc_values,
         min_gap_values,
         top_score_ceiling_values,
     ):
         apply_combo_to_chain(
-            chain, retrieval_k_initial, confidence, min_doc, min_gap, top_score_ceiling
+            chain, retrieval_k_initial, retrieval_k, confidence, min_doc, min_gap, top_score_ceiling
         )
         metrics = evaluate_combo(
             chain,
@@ -549,6 +574,7 @@ def main() -> None:
         )
         row = {
             "retrieval_k_initial": retrieval_k_initial,
+            "retrieval_k": retrieval_k,
             "reranker_confidence_threshold": confidence,
             "reranker_min_doc_score": min_doc,
             "reranker_ambiguity_min_gap": min_gap,
@@ -557,11 +583,12 @@ def main() -> None:
         }
         rows.append(row)
         logger.info(
-            "k_init=%s conf=%.2f min_doc=%.2f min_gap=%.2f top_ceiling=%.2f -> "
+            "k_init=%s k=%s conf=%.2f min_doc=%.2f min_gap=%.2f top_ceiling=%.2f -> "
             "recall=%.3f coverage=%.3f precision=%.3f unexpected=%.3f "
             "single=%.3f multi=%.3f neg=%.3f neg_legal=%.3f neg_nonlegal=%.3f "
             "editorial=%.3f non_editorial_clean=%.3f avg_top=%.3f",
             retrieval_k_initial,
+            retrieval_k,
             confidence,
             min_doc,
             min_gap,

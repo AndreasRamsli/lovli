@@ -383,3 +383,59 @@ def test_prioritize_doc_types_no_editorial_edge_case(mock_settings):
         )
         assert [d.metadata["article_id"] for d in selected_docs] == ["p-1", "p-2"]
         assert selected_scores == [0.92, 0.9]
+
+
+def test_fetch_editorial_for_chapters_fallback_on_filter_error(mock_settings):
+    """Editorial fetch should fail open when filtered scroll is unsupported."""
+    with patch('lovli.chain.QdrantVectorStore') as mock_vs, \
+         patch('lovli.chain.HuggingFaceEmbeddings'), \
+         patch('lovli.chain.ChatOpenAI'), \
+         patch('lovli.chain.QdrantClient'):
+        vectorstore = MagicMock()
+        vectorstore.client = MagicMock()
+        vectorstore.client.scroll.side_effect = Exception("Index required but not found")
+        mock_vs.return_value = vectorstore
+        chain = LegalRAGChain(mock_settings)
+        docs = chain._fetch_editorial_for_chapters([("nl-19990326-017", "kapittel-9")])
+        assert docs == []
+
+
+def test_retrieve_injects_editorial_docs_before_prioritize(mock_settings):
+    """Non-reranker path should inject fetched editorial docs before prioritization."""
+    mock_settings.reranker_enabled = False
+    with patch('lovli.chain.QdrantVectorStore') as mock_vs, \
+         patch('lovli.chain.HuggingFaceEmbeddings'), \
+         patch('lovli.chain.ChatOpenAI'), \
+         patch('lovli.chain.QdrantClient'):
+        vectorstore = MagicMock()
+        retriever = MagicMock()
+        provision_doc = Mock(
+            metadata={
+                "law_id": "nl-19990326-017",
+                "chapter_id": "kapittel-9",
+                "article_id": "kapittel-9-paragraf-6",
+                "doc_type": "provision",
+            }
+        )
+        retriever.invoke.return_value = [provision_doc]
+        vectorstore.as_retriever.return_value = retriever
+        mock_vs.return_value = vectorstore
+
+        chain = LegalRAGChain(mock_settings)
+        editorial_doc = Mock(
+            metadata={
+                "law_id": "nl-19990326-017",
+                "chapter_id": "kapittel-9",
+                "article_id": "nl-19990326-017_kapittel-9_art_6",
+                "doc_type": "editorial_note",
+            }
+        )
+        chain._fetch_editorial_for_chapters = MagicMock(return_value=[editorial_doc])
+        chain._extract_sources = MagicMock(return_value=[])
+        chain._prioritize_doc_types = MagicMock(side_effect=lambda docs, scores, retrieval_query: (docs, scores))
+
+        chain.retrieve("Hva er oppsigelsestiden?")
+
+        assert chain._fetch_editorial_for_chapters.called
+        prioritized_docs = chain._prioritize_doc_types.call_args.args[0]
+        assert len(prioritized_docs) == 2
