@@ -18,6 +18,85 @@ logger = logging.getLogger(__name__)
 
 # Chat history constants
 CHAT_HISTORY_WINDOW = 6  # Last 6 messages (3 turns) for query rewriting context
+LOADING_TEXT = "Soker i lovtekster..."
+PROCESSING_TEXT = "Behandler sporsmalet ditt..."
+
+UI_TOKENS = {
+    "radius": 10,
+    "message_gap": 0.4,
+    "block_top_pad": 1.2,
+    "max_content_width": 1080,
+}
+
+QUESTION_TOPICS = {
+    "Depositum": [
+        "Hvor mye kan utleier kreve i depositum?",
+        "Må depositumet stå på en egen konto?",
+    ],
+    "Husleieøkning": [
+        "Kan utleier øke husleien hvert år?",
+        "Hva er reglene for indeksregulering?",
+    ],
+    "Leieforhold": [
+        "Kan jeg fremleie leiligheten min?",
+        "Er det lov å ha husdyr i leiebolig?",
+        "Er en tidsbestemt leieavtale på 1 år lovlig?",
+    ],
+    "Oppsigelse": [
+        "Hva er oppsigelsestiden for en vanlig leilighet?",
+        "Hva skjer ved oppsigelse av leieforhold?",
+        "Hva er oppsigelsesfristen ved utleie av hybel?",
+    ],
+    "Vedlikehold og mangler": [
+        "Hvem har ansvaret for vedlikehold av dørlåser og kraner?",
+        "Hva kan leier kreve hvis leiligheten har mangel?",
+        "Hva kan leier kreve ved forsinkelse i overlevering?",
+    ],
+}
+
+
+def _inject_ui_styles() -> None:
+    """Inject lightweight UI styles for consistent spacing and readability."""
+    st.markdown(
+        f"""
+        <style>
+            .main .block-container {{
+                padding-top: {UI_TOKENS["block_top_pad"]}rem;
+                max-width: {UI_TOKENS["max_content_width"]}px;
+            }}
+            [data-testid="stChatMessage"] {{
+                margin-bottom: {UI_TOKENS["message_gap"]}rem;
+                border: 1px solid rgba(120, 120, 120, 0.18);
+                border-radius: {UI_TOKENS["radius"]}px;
+            }}
+            .lovli-message {{
+                line-height: 1.55;
+            }}
+            .lovli-source-item {{
+                padding: 0.35rem 0.1rem 0.15rem 0.1rem;
+                border-bottom: 1px dashed rgba(120, 120, 120, 0.24);
+            }}
+            .lovli-source-item:last-child {{
+                border-bottom: none;
+            }}
+            .lovli-muted {{
+                font-size: 0.9rem;
+                opacity: 0.85;
+            }}
+            @media (max-width: 992px) {{
+                .main .block-container {{
+                    padding-top: 0.9rem;
+                    padding-left: 0.8rem;
+                    padding-right: 0.8rem;
+                }}
+                [data-testid="stChatMessage"] {{
+                    margin-bottom: 0.3rem;
+                }}
+            }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 def _format_source(source: dict) -> str:
     """Format a source dict into a readable markdown string."""
@@ -38,7 +117,7 @@ def _format_source(source: dict) -> str:
 
     editorial_notes = source.get("editorial_notes") or []
     editorial_tag = f" ({len(editorial_notes)} redaksjonelle merknader)" if editorial_notes else ""
-    return f"**{law_name}** -{chapter} {title}{editorial_tag}"
+    return f"**{law_name}**{chapter} {title}{editorial_tag}".strip()
 
 
 def _format_editorial_notes(source: dict) -> str:
@@ -63,12 +142,41 @@ def _format_editorial_notes(source: dict) -> str:
     return "\n".join(lines)
 
 
+def _render_sources(sources: list[dict]) -> None:
+    """Render source list with consistent compact styling."""
+    if not sources:
+        return
+
+    with st.expander(f"Sources ({len(sources)})"):
+        for source in sources:
+            st.markdown('<div class="lovli-source-item">', unsafe_allow_html=True)
+            source_text = _format_source(source)
+            if source.get("url"):
+                st.markdown(f"{source_text} - [View on Lovdata]({source['url']})")
+            else:
+                st.markdown(source_text)
+
+            editorial_text = _format_editorial_notes(source)
+            if editorial_text:
+                st.markdown("**Editorial notes**")
+                st.markdown(editorial_text)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _truncate_label(value: str, max_length: int = 82) -> str:
+    """Truncate long labels for cleaner button rendering."""
+    if len(value) <= max_length:
+        return value
+    return f"{value[:max_length - 3]}..."
+
+
 # Page configuration
 st.set_page_config(
     page_title="Lovli - Legal Assistant",
     page_icon="⚖️",
     layout="wide",
 )
+_inject_ui_styles()
 
 
 @st.cache_resource
@@ -122,7 +230,7 @@ st.markdown(
 
 # Sidebar
 with st.sidebar:
-    st.header("About")
+    st.header("About Lovli")
     st.markdown(
         """
         Lovli is a RAG-powered assistant that helps you find information 
@@ -131,40 +239,27 @@ with st.sidebar:
         **Data Source**: Lovdata (NLOD 2.0)
         """
     )
+    st.caption("Tips: choose a suggested question to start quickly.")
+    st.divider()
+    st.subheader("Suggested Questions")
 
-    st.header("Suggested Questions")
-    
-    # Organize questions by topic
-    question_topics = {
-        "Depositum": [
-            "Hvor mye kan utleier kreve i depositum?",
-            "Må depositumet stå på en egen konto?",
-        ],
-        "Husleieøkning": [
-            "Kan utleier øke husleien hvert år?",
-            "Hva er reglene for indeksregulering?",
-        ],
-        "Oppsigelse": [
-            "Hva er oppsigelsestiden for en vanlig leilighet?",
-            "Hva skjer ved oppsigelse av leieforhold?",
-            "Hva er oppsigelsesfristen ved utleie av hybel?",
-        ],
-        "Vedlikehold og mangler": [
-            "Hvem har ansvaret for vedlikehold av dørlåser og kraner?",
-            "Hva kan leier kreve hvis leiligheten har mangel?",
-            "Hva kan leier kreve ved forsinkelse i overlevering?",
-        ],
-        "Leieforhold": [
-            "Kan jeg fremleie leiligheten min?",
-            "Er det lov å ha husdyr i leiebolig?",
-            "Er en tidsbestemt leieavtale på 1 år lovlig?",
-        ],
-    }
-    
-    for topic, questions in question_topics.items():
-        with st.expander(topic):
+    topic_options = ["All topics", *QUESTION_TOPICS.keys()]
+    selected_topic = st.selectbox("Filter topics", options=topic_options, index=0)
+    topics_to_render = (
+        QUESTION_TOPICS.items()
+        if selected_topic == "All topics"
+        else [(selected_topic, QUESTION_TOPICS[selected_topic])]
+    )
+
+    for topic, questions in topics_to_render:
+        with st.expander(topic, expanded=selected_topic != "All topics"):
             for q in questions:
-                if st.button(q, key=f"suggest_{topic}_{q}", use_container_width=True):
+                if st.button(
+                    _truncate_label(q),
+                    key=f"suggest_{topic}_{q}",
+                    use_container_width=True,
+                    help=q,
+                ):
                     st.session_state.user_question = q
                     st.rerun()
 
@@ -184,16 +279,14 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         if "sources" in message and message["sources"]:
-            with st.expander("📚 Sources"):
-                for source in message["sources"]:
-                    source_text = _format_source(source)
-                    if source.get("url"):
-                        st.markdown(f"{source_text} - [View on Lovdata]({source['url']})")
-                    else:
-                        st.markdown(source_text)
-                    editorial_text = _format_editorial_notes(source)
-                    if editorial_text:
-                        st.markdown(editorial_text)
+            _render_sources(message["sources"])
+
+if not st.session_state.messages:
+    st.info(
+        "Still a question to get started, or choose a suggested prompt in the sidebar."
+    )
+else:
+    st.caption("Ask follow-up questions to keep the context in the conversation.")
 
 # User input (from chat input or suggested question)
 if prompt is None:
@@ -208,8 +301,12 @@ if prompt:
     # Get response
     with st.chat_message("assistant"):
         try:
+            st.markdown(
+                f'<div class="lovli-muted">{PROCESSING_TEXT}</div>',
+                unsafe_allow_html=True,
+            )
             # Step 1: Retrieve (fast)
-            with st.spinner("Søker i lovtekster..."):
+            with st.spinner(LOADING_TEXT):
                 # Extract chat history for query rewriting
                 chat_history = extract_chat_history(
                     st.session_state.messages,
@@ -224,6 +321,7 @@ if prompt:
             # Step 2: Stream answer
             if not sources:
                 answer = NO_RESULTS_RESPONSE
+                st.warning("No direct legal sources matched strongly enough for this query.")
                 st.markdown(answer)
                 st.session_state.messages.append({
                     "role": "assistant",
@@ -246,16 +344,11 @@ if prompt:
 
                 # Only show sources if answer wasn't gated (gated responses shouldn't show sources)
                 if not is_gated:
-                    with st.expander("📚 Sources"):
-                        for source in sources:
-                            source_text = _format_source(source)
-                            if source.get("url"):
-                                st.markdown(f"{source_text} - [View on Lovdata]({source['url']})")
-                            else:
-                                st.markdown(source_text)
-                            editorial_text = _format_editorial_notes(source)
-                            if editorial_text:
-                                st.markdown(editorial_text)
+                    _render_sources(sources)
+                else:
+                    st.info("Response confidence was low, so source cards were intentionally hidden.")
+
+                st.caption("Finished.")
 
                 # Store sources without content to save memory
                 # For gated responses, store empty sources list
