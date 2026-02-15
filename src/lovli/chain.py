@@ -29,14 +29,6 @@ MAX_QUESTION_LENGTH = 1000
 QUERY_REWRITE_MIN_LENGTH_RATIO = 0.5  # Rewritten query must be at least 50% of original length
 QUERY_REWRITE_HISTORY_WINDOW = 4  # Last 4 messages (2 turns) for context
 _ROUTING_TOKEN_RE = re.compile(r"[a-z0-9]{3,}")
-_EDITORIAL_HISTORY_INTENT_RE = re.compile(
-    r"\b("
-    r"endret|endring|endringer|endret|tilf[oø]y(d|et)|opphevet|historikk|"
-    r"tidligere|versjon|ikraft|ikrafttredelse|lovendring|amendment|"
-    r"change(s)?|history|repealed"
-    r")\b",
-    flags=re.IGNORECASE,
-)
 
 # Confidence gating response (used by both streaming and non-streaming paths)
 GATED_RESPONSE = (
@@ -70,6 +62,21 @@ def _infer_doc_type(metadata: Dict[str, Any]) -> str:
     if title == "Untitled Article" or "_art_" in article_id:
         return "editorial_note"
     return "provision"
+
+
+def _editorial_note_payload(doc: Document) -> Dict[str, Any]:
+    """Normalize an editorial note document into a compact metadata payload."""
+    metadata = doc.metadata if hasattr(doc, "metadata") else {}
+    return {
+        "law_id": metadata.get("law_id", ""),
+        "article_id": metadata.get("article_id", ""),
+        "linked_provision_id": metadata.get("linked_provision_id"),
+        "chapter_id": metadata.get("chapter_id"),
+        "title": metadata.get("title", ""),
+        "url": metadata.get("url"),
+        "source_anchor_id": metadata.get("source_anchor_id"),
+        "content": doc.page_content if hasattr(doc, "page_content") else "",
+    }
 
 
 class LegalRAGChain:
@@ -212,34 +219,36 @@ Kontekst fra lovtekster:
         return question
 
     def _format_context(self, sources: list[Dict[str, Any]]) -> str:
-        """Format retrieved sources with legal basis first and editorial notes second."""
-        provisions = [s for s in sources if s.get("doc_type") != "editorial_note"]
-        editorial_notes = [s for s in sources if s.get("doc_type") == "editorial_note"]
+        """Format retrieved sources with editorial notes attached to each provision."""
+        if not sources:
+            return ""
 
-        blocks: list[str] = []
-        if provisions:
-            blocks.append(
-                "Lovgrunnlag:\n"
-                + "\n\n".join(
-                    [
-                        f"Lov: {s['law_title']} (§ {s['article_id']})\n{s.get('content', '')}"
-                        for s in provisions
-                    ]
-                )
+        provision_blocks: list[str] = []
+        for source in sources:
+            if source.get("doc_type") == "editorial_note":
+                continue
+
+            block = (
+                f"Lov: {source.get('law_title', 'Unknown')} (§ {source.get('article_id', 'Unknown')})\n"
+                f"{source.get('content', '')}"
             )
+            editorial_notes = source.get("editorial_notes") or []
+            if editorial_notes:
+                history_lines = []
+                for note in editorial_notes:
+                    note_id = note.get("article_id", "")
+                    note_content = (note.get("content") or "").strip()
+                    if note_id and note_content:
+                        history_lines.append(f"- [{note_id}] {note_content}")
+                    elif note_content:
+                        history_lines.append(f"- {note_content}")
+                if history_lines:
+                    block += "\n\nEndringshistorikk:\n" + "\n".join(history_lines)
+            provision_blocks.append(block)
 
-        if editorial_notes:
-            blocks.append(
-                "Endringshistorikk (redaksjonelle merknader):\n"
-                + "\n\n".join(
-                    [
-                        f"Lov: {s['law_title']} ({s['article_id']})\n{s.get('content', '')}"
-                        for s in editorial_notes
-                    ]
-                )
-            )
-
-        return "\n\n".join(blocks)
+        if not provision_blocks:
+            return ""
+        return "Lovgrunnlag:\n" + "\n\n".join(provision_blocks)
 
     def _extract_sources(
         self, 
@@ -267,38 +276,12 @@ Kontekst fra lovtekster:
                     "url": metadata.get("url"),
                     "source_anchor_id": metadata.get("source_anchor_id"),
                     "doc_type": _infer_doc_type(metadata),
+                    "editorial_notes": metadata.get("editorial_notes", []),
                 }
                 if include_content:
                     source["content"] = doc.page_content if hasattr(doc, "page_content") else ""
                 sources.append(source)
         return sources
-
-    def _is_history_intent(self, retrieval_query: str) -> bool:
-        """Detect whether user likely wants amendment/change-history context."""
-        return bool(_EDITORIAL_HISTORY_INTENT_RE.search((retrieval_query or "").lower()))
-
-    def _compute_editorial_budget(self, total_docs: int, retrieval_query: str) -> int:
-        """
-        Compute editorial-note allowance from configurable budget controls.
-
-        Keeps behavior conservative by default while allowing expansion on
-        history-oriented queries.
-        """
-        if total_docs <= 0:
-            return 0
-
-        base_max = self.settings.editorial_base_max_notes
-        hard_max = self.settings.editorial_max_notes
-        if hard_max <= 0:
-            return 0
-
-        ratio_slots = math.ceil(total_docs * self.settings.editorial_context_budget_ratio)
-        budget = max(base_max, ratio_slots)
-
-        if self._is_history_intent(retrieval_query):
-            budget += self.settings.editorial_history_intent_boost
-
-        return min(hard_max, max(0, budget))
 
     def _fetch_editorial_for_provisions(
         self,
@@ -445,54 +428,87 @@ Kontekst fra lovtekster:
 
         return dedupe_by_law_article(editorial_docs)
 
-    def _inject_editorial_and_prioritize(
-        self, docs: list, scores: list[float], retrieval_query: str
+    def _attach_editorial_to_provisions(
+        self, docs: list, scores: list[float] | None = None
     ) -> tuple[list, list[float]]:
-        """Fetch editorial notes for provisions, append them to docs, and apply budget prioritization."""
+        """Attach editorial notes to parent provisions and keep score alignment."""
         if not docs:
-            return docs, scores
+            return docs, scores or []
 
-        provision_pairs = collect_provision_article_pairs(docs)
+        has_aligned_scores = bool(scores) and len(scores) == len(docs)
+        provisions: list = []
+        provision_scores: list[float] = []
+        if has_aligned_scores:
+            for doc, score in zip(docs, scores):
+                metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+                if _infer_doc_type(metadata) != "editorial_note":
+                    provisions.append(doc)
+                    provision_scores.append(score)
+        else:
+            for doc in docs:
+                metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+                if _infer_doc_type(metadata) != "editorial_note":
+                    provisions.append(doc)
+        if not provisions:
+            return provisions, provision_scores if has_aligned_scores else []
+
+        editorial_by_provision: Dict[tuple[str, str], list[Dict[str, Any]]] = {}
+        editorial_by_chapter: Dict[tuple[str, str], list[Dict[str, Any]]] = {}
+
+        provision_pairs = collect_provision_article_pairs(provisions)
         editorial_docs = self._fetch_editorial_for_provisions(provision_pairs)
         if not editorial_docs:
-            law_chapter_pairs = collect_provision_law_chapter_pairs(docs)
+            law_chapter_pairs = collect_provision_law_chapter_pairs(provisions)
             editorial_docs = self._fetch_editorial_for_chapters(law_chapter_pairs, per_chapter_cap=2)
-        if editorial_docs:
-            n_provisions = len(docs)
-            docs = list(docs) + list(editorial_docs)
-            if scores and len(scores) == n_provisions:
-                scores = list(scores) + [0.0] * len(editorial_docs)
-        return self._prioritize_doc_types(docs, scores, retrieval_query=retrieval_query)
+
+        for editorial_doc in editorial_docs:
+            e_meta = editorial_doc.metadata if hasattr(editorial_doc, "metadata") else {}
+            note_payload = _editorial_note_payload(editorial_doc)
+            law_id = (e_meta.get("law_id") or "").strip()
+            linked_provision_id = (e_meta.get("linked_provision_id") or "").strip()
+            chapter_id = (e_meta.get("chapter_id") or "").strip()
+            if law_id and linked_provision_id:
+                editorial_by_provision.setdefault((law_id, linked_provision_id), []).append(note_payload)
+            elif law_id and chapter_id:
+                editorial_by_chapter.setdefault((law_id, chapter_id), []).append(note_payload)
+
+        chapter_to_provision_keys: Dict[tuple[str, str], list[tuple[str, str]]] = {}
+        for provision_doc in provisions:
+            p_meta = provision_doc.metadata if hasattr(provision_doc, "metadata") else {}
+            law_id = (p_meta.get("law_id") or "").strip()
+            article_id = (p_meta.get("article_id") or "").strip()
+            chapter_id = (p_meta.get("chapter_id") or "").strip()
+            if law_id and chapter_id and article_id:
+                chapter_to_provision_keys.setdefault((law_id, chapter_id), []).append((law_id, article_id))
+
+        for provision_doc in provisions:
+            p_meta = provision_doc.metadata if hasattr(provision_doc, "metadata") else {}
+            law_id = (p_meta.get("law_id") or "").strip()
+            article_id = (p_meta.get("article_id") or "").strip()
+            chapter_id = (p_meta.get("chapter_id") or "").strip()
+            notes = list(editorial_by_provision.get((law_id, article_id), []))
+            # Chapter fallback is only safe when exactly one retrieved provision
+            # exists in that chapter; otherwise note ownership is ambiguous.
+            chapter_key = (law_id, chapter_id)
+            if (
+                not notes
+                and law_id
+                and chapter_id
+                and len(chapter_to_provision_keys.get(chapter_key, [])) == 1
+            ):
+                notes = list(editorial_by_chapter.get(chapter_key, []))
+            p_meta["editorial_notes"] = notes
+        return provisions, provision_scores if has_aligned_scores else []
 
     def _prioritize_doc_types(
         self, docs: list, scores: list[float], retrieval_query: str
     ) -> tuple[list, list[float]]:
-        """
-        Keep substantive provisions as primary context and budget editorial notes.
-
-        Editorial notes are still retained as supplemental context.
-        """
+        """Keep provisions only; editorial context is attached within provision metadata."""
         if not docs:
             return docs, scores
-
-        zipped = list(zip(docs, scores)) if scores and len(scores) == len(docs) else [(doc, None) for doc in docs]
-        provisions: list[tuple[Any, float | None]] = []
-        editorial: list[tuple[Any, float | None]] = []
-        for doc, score in zipped:
-            metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
-            if _infer_doc_type(metadata) == "editorial_note":
-                editorial.append((doc, score))
-            else:
-                provisions.append((doc, score))
-
-        editorial_budget = self._compute_editorial_budget(
-            total_docs=len(provisions),
-            retrieval_query=retrieval_query,
-        )
-        selected = provisions + editorial[:editorial_budget]
-        selected_docs = [doc for doc, _ in selected]
-        selected_scores = [score for _, score in selected if score is not None]
-        return selected_docs, selected_scores
+        if scores and len(scores) == len(docs):
+            return docs, scores
+        return docs, []
 
     def _rerank(self, query: str, docs: list, top_k: int | None = None) -> Tuple[list, list[float]]:
         """
@@ -778,14 +794,16 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
         if self.reranker and docs:
             docs, scores = self._rerank(retrieval_query, docs, top_k=self.settings.retrieval_k)
             docs, scores = self._apply_reranker_doc_filter(docs, scores)
-            docs, scores = self._inject_editorial_and_prioritize(docs, scores, retrieval_query=retrieval_query)
+            docs, scores = self._attach_editorial_to_provisions(docs, scores=scores)
+            docs, scores = self._prioritize_doc_types(docs, scores, retrieval_query=retrieval_query)
             top_score = scores[0] if scores else None
             if top_score is not None:
                 logger.debug(f"Reranked {len(docs)} documents, top score: {top_score:.3f}")
             else:
                 logger.debug(f"Reranking returned no scores for {len(docs)} documents")
         elif docs:
-            docs, scores = self._inject_editorial_and_prioritize(docs, scores, retrieval_query=retrieval_query)
+            docs, scores = self._attach_editorial_to_provisions(docs, scores=scores)
+            docs, scores = self._prioritize_doc_types(docs, scores, retrieval_query=retrieval_query)
         
         sources = self._extract_sources(docs, include_content=True)
         return sources, top_score, scores

@@ -269,7 +269,7 @@ def test_extract_sources_includes_doc_type(mock_settings):
 
 
 def test_prioritize_doc_types_adaptive_budget(mock_settings):
-    """Editorial notes should respect adaptive budget while provisions stay first."""
+    """Prioritization is a pass-through for attached-editorial model."""
     with patch('lovli.chain.QdrantVectorStore'), \
          patch('lovli.chain.HuggingFaceEmbeddings'), \
          patch('lovli.chain.ChatOpenAI'), \
@@ -287,13 +287,12 @@ def test_prioritize_doc_types_adaptive_budget(mock_settings):
             scores,
             retrieval_query="Hva er reglene for oppsigelse?",
         )
-        assert len(selected_docs) == 3  # 1 provision + 2 editorial notes at default budget
-        assert selected_docs[0].metadata["doc_type"] == "provision"
-        assert selected_scores == [0.9, 0.8, 0.7]
+        assert len(selected_docs) == 4
+        assert selected_scores == scores
 
 
-def test_format_context_separates_editorial_section(mock_settings):
-    """Context formatter should separate legal basis and editorial history."""
+def test_format_context_renders_inline_editorial_notes(mock_settings):
+    """Context formatter should render editorial notes inline per provision."""
     with patch('lovli.chain.QdrantVectorStore'), \
          patch('lovli.chain.HuggingFaceEmbeddings'), \
          patch('lovli.chain.ChatOpenAI'), \
@@ -305,67 +304,92 @@ def test_format_context_separates_editorial_section(mock_settings):
                 "article_id": "kapittel-9-paragraf-6",
                 "doc_type": "provision",
                 "content": "Oppsigelsesfristen er tre måneder.",
-            },
-            {
-                "law_title": "Husleieloven",
-                "article_id": "nl-19990326-017_art_6",
-                "doc_type": "editorial_note",
-                "content": "Endret ved lov 16 jan 2009 nr. 6.",
+                "editorial_notes": [
+                    {
+                        "article_id": "nl-19990326-017_art_6",
+                        "content": "Endret ved lov 16 jan 2009 nr. 6.",
+                    }
+                ],
             },
         ]
         context = chain._format_context(sources)
         assert "Lovgrunnlag:" in context
-        assert "Endringshistorikk (redaksjonelle merknader):" in context
+        assert "Endringshistorikk:" in context
+        assert "[nl-19990326-017_art_6]" in context
 
 
-def test_prioritize_doc_types_history_intent_boost(mock_settings):
-    """History intent should allow one extra editorial note (up to max)."""
+def test_attach_editorial_to_provisions_includes_linked_notes(mock_settings):
+    """Retrieved provisions should carry attached editorial notes in metadata."""
     with patch('lovli.chain.QdrantVectorStore'), \
          patch('lovli.chain.HuggingFaceEmbeddings'), \
          patch('lovli.chain.ChatOpenAI'), \
          patch('lovli.chain.QdrantClient'):
         chain = LegalRAGChain(mock_settings)
-        docs = [
-            Mock(metadata={"article_id": "p-1", "doc_type": "provision"}),
-            Mock(metadata={"article_id": "e-1", "doc_type": "editorial_note"}),
-            Mock(metadata={"article_id": "e-2", "doc_type": "editorial_note"}),
-            Mock(metadata={"article_id": "e-3", "doc_type": "editorial_note"}),
-            Mock(metadata={"article_id": "e-4", "doc_type": "editorial_note"}),
-        ]
-        scores = [0.91, 0.85, 0.83, 0.8, 0.78]
-        selected_docs, _ = chain._prioritize_doc_types(
-            docs,
-            scores,
-            retrieval_query="Hva er endringshistorikk og når ble paragrafen endret?",
+        provision_doc = Mock(
+            metadata={
+                "law_id": "nl-19990326-017",
+                "chapter_id": "kapittel-9",
+                "article_id": "kapittel-9-paragraf-6",
+                "doc_type": "provision",
+            },
+            page_content="Oppsigelsesfristen er tre måneder.",
         )
-        assert len(selected_docs) == 4  # 1 provision + 3 editorial (boosted from 2 to 3)
-        assert [d.metadata["article_id"] for d in selected_docs] == ["p-1", "e-1", "e-2", "e-3"]
+        editorial_doc = Mock(
+            metadata={
+                "law_id": "nl-19990326-017",
+                "chapter_id": "kapittel-9",
+                "article_id": "nl-19990326-017_kapittel-9_art_6",
+                "linked_provision_id": "kapittel-9-paragraf-6",
+                "doc_type": "editorial_note",
+            },
+            page_content="Endret ved lov 16 jan 2009 nr. 6.",
+        )
+        chain._fetch_editorial_for_provisions = MagicMock(return_value=[editorial_doc])
+        attached, attached_scores = chain._attach_editorial_to_provisions([provision_doc])
+        assert len(attached) == 1
+        assert attached_scores == []
+        assert attached[0].metadata["article_id"] == "kapittel-9-paragraf-6"
+        notes = attached[0].metadata.get("editorial_notes", [])
+        assert len(notes) == 1
+        assert notes[0]["linked_provision_id"] == "kapittel-9-paragraf-6"
 
 
-def test_prioritize_doc_types_no_provision_edge_case(mock_settings):
-    """When only editorial docs are retrieved, budget still applies deterministically."""
+def test_attach_editorial_to_provisions_keeps_score_alignment(mock_settings):
+    """Dropping editorial docs must preserve provision score alignment for gating."""
     with patch('lovli.chain.QdrantVectorStore'), \
          patch('lovli.chain.HuggingFaceEmbeddings'), \
          patch('lovli.chain.ChatOpenAI'), \
          patch('lovli.chain.QdrantClient'):
         chain = LegalRAGChain(mock_settings)
-        docs = [
-            Mock(metadata={"article_id": "e-1", "doc_type": "editorial_note"}),
-            Mock(metadata={"article_id": "e-2", "doc_type": "editorial_note"}),
-            Mock(metadata={"article_id": "e-3", "doc_type": "editorial_note"}),
-        ]
-        scores = [0.8, 0.7, 0.6]
-        selected_docs, selected_scores = chain._prioritize_doc_types(
-            docs,
-            scores,
-            retrieval_query="Hva står i loven?",
+        provision_doc = Mock(
+            metadata={
+                "law_id": "nl-19990326-017",
+                "chapter_id": "kapittel-9",
+                "article_id": "kapittel-9-paragraf-6",
+                "doc_type": "provision",
+            },
+            page_content="Oppsigelsesfristen er tre måneder.",
         )
-        assert selected_docs == []
-        assert selected_scores == []
+        editorial_doc = Mock(
+            metadata={
+                "law_id": "nl-19990326-017",
+                "chapter_id": "kapittel-9",
+                "article_id": "nl-19990326-017_kapittel-9_art_6",
+                "linked_provision_id": "kapittel-9-paragraf-6",
+                "doc_type": "editorial_note",
+            },
+            page_content="Endret ved lov 16 jan 2009 nr. 6.",
+        )
+        attached, scores = chain._attach_editorial_to_provisions(
+            [provision_doc, editorial_doc],
+            scores=[0.91, 0.12],
+        )
+        assert len(attached) == 1
+        assert scores == [0.91]
 
 
 def test_prioritize_doc_types_no_editorial_edge_case(mock_settings):
-    """When no editorial docs exist, all provisions should pass through."""
+    """Prioritization returns empty scores when score/doc lengths mismatch."""
     with patch('lovli.chain.QdrantVectorStore'), \
          patch('lovli.chain.HuggingFaceEmbeddings'), \
          patch('lovli.chain.ChatOpenAI'), \
@@ -378,11 +402,11 @@ def test_prioritize_doc_types_no_editorial_edge_case(mock_settings):
         scores = [0.92, 0.9]
         selected_docs, selected_scores = chain._prioritize_doc_types(
             docs,
-            scores,
+            [],
             retrieval_query="Hva står i § 9-6?",
         )
         assert [d.metadata["article_id"] for d in selected_docs] == ["p-1", "p-2"]
-        assert selected_scores == [0.92, 0.9]
+        assert selected_scores == []
 
 
 def test_fetch_editorial_for_chapters_fallback_on_filter_error(mock_settings):
@@ -415,8 +439,8 @@ def test_fetch_editorial_for_provisions_fallback_on_filter_error(mock_settings):
         assert docs == []
 
 
-def test_retrieve_injects_editorial_docs_before_prioritize(mock_settings):
-    """Non-reranker path should inject fetched editorial docs before prioritization."""
+def test_retrieve_attaches_editorial_notes_before_extracting_sources(mock_settings):
+    """Non-reranker path should attach editorial notes to provision metadata."""
     mock_settings.reranker_enabled = False
     with patch('lovli.chain.QdrantVectorStore') as mock_vs, \
          patch('lovli.chain.HuggingFaceEmbeddings'), \
@@ -447,10 +471,36 @@ def test_retrieve_injects_editorial_docs_before_prioritize(mock_settings):
         )
         chain._fetch_editorial_for_provisions = MagicMock(return_value=[editorial_doc])
         chain._extract_sources = MagicMock(return_value=[])
-        chain._prioritize_doc_types = MagicMock(side_effect=lambda docs, scores, retrieval_query: (docs, scores))
 
         chain.retrieve("Hva er oppsigelsestiden?")
 
         assert chain._fetch_editorial_for_provisions.called
-        prioritized_docs = chain._prioritize_doc_types.call_args.args[0]
-        assert len(prioritized_docs) == 2
+        attached_docs = chain._extract_sources.call_args.args[0]
+        assert len(attached_docs) == 1
+        notes = attached_docs[0].metadata.get("editorial_notes", [])
+        assert len(notes) == 1
+
+
+def test_attach_editorial_chapter_fallback_skips_ambiguous_chapter(mock_settings):
+    """Chapter fallback should not attach notes when multiple provisions share chapter."""
+    with patch('lovli.chain.QdrantVectorStore'), \
+         patch('lovli.chain.HuggingFaceEmbeddings'), \
+         patch('lovli.chain.ChatOpenAI'), \
+         patch('lovli.chain.QdrantClient'):
+        chain = LegalRAGChain(mock_settings)
+        p1 = Mock(metadata={"law_id": "nl-19990326-017", "chapter_id": "kapittel-9", "article_id": "p-1", "doc_type": "provision"}, page_content="p1")
+        p2 = Mock(metadata={"law_id": "nl-19990326-017", "chapter_id": "kapittel-9", "article_id": "p-2", "doc_type": "provision"}, page_content="p2")
+        chapter_editorial = Mock(
+            metadata={
+                "law_id": "nl-19990326-017",
+                "chapter_id": "kapittel-9",
+                "article_id": "e-1",
+                "doc_type": "editorial_note",
+            },
+            page_content="chapter note",
+        )
+        chain._fetch_editorial_for_provisions = MagicMock(return_value=[])
+        chain._fetch_editorial_for_chapters = MagicMock(return_value=[chapter_editorial])
+        attached, _ = chain._attach_editorial_to_provisions([p1, p2], scores=[0.8, 0.7])
+        assert attached[0].metadata.get("editorial_notes") == []
+        assert attached[1].metadata.get("editorial_notes") == []

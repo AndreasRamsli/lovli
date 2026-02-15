@@ -36,7 +36,31 @@ def _format_source(source: dict) -> str:
         else:
             chapter = f" {source['chapter_title']} -"
 
-    return f"**{law_name}** -{chapter} {title}"
+    editorial_notes = source.get("editorial_notes") or []
+    editorial_tag = f" ({len(editorial_notes)} redaksjonelle merknader)" if editorial_notes else ""
+    return f"**{law_name}** -{chapter} {title}{editorial_tag}"
+
+
+def _format_editorial_notes(source: dict) -> str:
+    """Render attached editorial notes as compact bullet list."""
+    notes = source.get("editorial_notes") or []
+    if not notes:
+        return ""
+    lines = []
+    for note in notes:
+        note_id = note.get("article_id", "")
+        content = (note.get("content") or "").strip()
+        if note_id and content:
+            lines.append(f"- `{note_id}`: {content}")
+        elif note_id:
+            lines.append(f"- `{note_id}`")
+        elif content:
+            lines.append(f"- {content}")
+        else:
+            continue
+    if not lines:
+        return ""
+    return "\n".join(lines)
 
 
 # Page configuration
@@ -167,6 +191,9 @@ for message in st.session_state.messages:
                         st.markdown(f"{source_text} - [View on Lovdata]({source['url']})")
                     else:
                         st.markdown(source_text)
+                    editorial_text = _format_editorial_notes(source)
+                    if editorial_text:
+                        st.markdown(editorial_text)
 
 # User input (from chat input or suggested question)
 if prompt is None:
@@ -226,6 +253,9 @@ if prompt:
                                 st.markdown(f"{source_text} - [View on Lovdata]({source['url']})")
                             else:
                                 st.markdown(source_text)
+                            editorial_text = _format_editorial_notes(source)
+                            if editorial_text:
+                                st.markdown(editorial_text)
 
                 # Store sources without content to save memory
                 # For gated responses, store empty sources list
@@ -233,7 +263,18 @@ if prompt:
                     []
                     if is_gated
                     else [
-                        {k: v for k, v in s.items() if k != "content"}
+                        {
+                            **{k: v for k, v in s.items() if k not in {"content", "editorial_notes"}},
+                            "editorial_notes": [
+                                {
+                                    "article_id": note.get("article_id"),
+                                    "title": note.get("title"),
+                                    "url": note.get("url"),
+                                    "linked_provision_id": note.get("linked_provision_id"),
+                                }
+                                for note in (s.get("editorial_notes") or [])
+                            ],
+                        }
                         for s in sources
                     ]
                 )

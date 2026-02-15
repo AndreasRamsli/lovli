@@ -127,28 +127,25 @@ class Settings(BaseSettings):
         default=2,
         ge=0,
         le=10,
-        description="Minimum editorial-note slots allowed in retrieval context before "
-        "adaptive scaling.",
+        description="Deprecated: legacy editorial slot budget baseline.",
     )
     editorial_max_notes: int = Field(
         default=4,
         ge=0,
         le=20,
-        description="Hard upper bound on editorial-note slots in retrieval context.",
+        description="Deprecated: legacy editorial slot budget cap.",
     )
     editorial_context_budget_ratio: float = Field(
         default=0.4,
         ge=0.0,
         le=1.0,
-        description="Fraction of retrieved context budget that can be used for "
-        "editorial notes.",
+        description="Deprecated: legacy editorial slot budget ratio.",
     )
     editorial_history_intent_boost: int = Field(
         default=1,
         ge=0,
         le=10,
-        description="Extra editorial-note slots when query appears to ask about "
-        "change history or amendments.",
+        description="Deprecated: legacy editorial slot history-intent boost.",
     )
 
     # Optional law routing (Tier 0 catalog)

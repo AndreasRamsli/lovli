@@ -8,9 +8,7 @@ and non_editorial_clean_success. Supports offline runs via --cache.
 
 import argparse
 import json
-import math
 import os
-import re
 import sys
 from pathlib import Path
 
@@ -21,37 +19,6 @@ except ImportError:
 
 ROOT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT_DIR / "src"))
-
-# History intent regex (mirrors chain.py)
-_EDITORIAL_HISTORY_INTENT_RE = re.compile(
-    r"\b("
-    r"endret|endring|endringer|endret|tilf[oø]y(d|et)|opphevet|historikk|"
-    r"tidligere|versjon|ikraft|ikrafttredelse|lovendring|amendment|"
-    r"change(s)?|history|repealed"
-    r")\b",
-    flags=re.IGNORECASE,
-)
-
-
-def _compute_editorial_budget_standalone(
-    total_docs: int,
-    retrieval_query: str,
-    base_max: int = 2,
-    hard_max: int = 4,
-    ratio: float = 0.4,
-    history_boost: int = 1,
-) -> int:
-    """Standalone editorial budget calculation for offline benchmark runs."""
-    if total_docs <= 0:
-        return 0
-    if hard_max <= 0:
-        return 0
-    ratio_slots = math.ceil(total_docs * ratio)
-    budget = max(base_max, ratio_slots)
-    if bool(_EDITORIAL_HISTORY_INTENT_RE.search((retrieval_query or "").lower())):
-        budget += history_boost
-    return min(hard_max, max(0, budget))
-
 
 from lovli.chain import LegalRAGChain
 from lovli.config import get_settings
@@ -90,25 +57,33 @@ def _matches_expected_source(cited_source: dict, expected_source: dict) -> bool:
     return cited_law == expected_law and cited_article.startswith(expected_article)
 
 
-def _make_budget_fn(chain_or_settings):
-    """Return a budget function compatible with either chain or settings."""
-    if hasattr(chain_or_settings, "_compute_editorial_budget"):
-        return lambda total_docs, retrieval_query: chain_or_settings._compute_editorial_budget(
-            total_docs=total_docs, retrieval_query=retrieval_query
-        )
-    s = chain_or_settings
-    return lambda total_docs, retrieval_query: _compute_editorial_budget_standalone(
-        total_docs,
-        retrieval_query,
-        base_max=getattr(s, "editorial_base_max_notes", 2),
-        hard_max=getattr(s, "editorial_max_notes", 4),
-        ratio=getattr(s, "editorial_context_budget_ratio", 0.4),
-        history_boost=getattr(s, "editorial_history_intent_boost", 1),
-    )
+def _has_attached_editorial(provision_rows: list[dict], editorial_candidates: list[dict]) -> bool:
+    """Return True when any kept provision has linked/chapter editorial candidates."""
+    if not provision_rows or not editorial_candidates:
+        return False
+    provision_article_pairs = {
+        ((row.get("law_id") or "").strip(), (row.get("article_id") or "").strip())
+        for row in provision_rows
+        if (row.get("law_id") or "").strip() and (row.get("article_id") or "").strip()
+    }
+    provision_chapter_pairs = {
+        ((row.get("law_id") or "").strip(), (row.get("chapter_id") or "").strip())
+        for row in provision_rows
+        if (row.get("law_id") or "").strip() and (row.get("chapter_id") or "").strip()
+    }
+    for candidate in editorial_candidates:
+        law_id = (candidate.get("law_id") or "").strip()
+        linked = (candidate.get("linked_provision_id") or "").strip()
+        chapter_id = (candidate.get("chapter_id") or "").strip()
+        if law_id and linked and (law_id, linked) in provision_article_pairs:
+            return True
+        if law_id and chapter_id and (law_id, chapter_id) in provision_chapter_pairs:
+            return True
+    return False
 
 
 def _compute_per_question_metrics(
-    row: dict, budget_fn, min_sources: int, editorial_candidates: list
+    row: dict, min_sources: int, editorial_candidates: list
 ) -> dict:
     """
     Simulate retrieval for one question and return precision, unexpected_rate, cited_editorial,
@@ -117,7 +92,6 @@ def _compute_per_question_metrics(
     expected = set(row.get("expected_articles", []))
     expected_sources = row.get("expected_sources", []) or []
     candidates = row.get("candidates", [])
-    question = row.get("question", "")
     expects_editorial_context = bool(row.get("expects_editorial_context", False))
 
     subset = candidates[:RETRIEVAL_K_INITIAL]
@@ -128,27 +102,15 @@ def _compute_per_question_metrics(
     if len(kept) < min(min_sources_val, len(ranked)):
         kept = ranked[: min(min_sources_val, len(ranked))]
 
-    provisions_before_injection = len(kept)
-    if editorial_candidates:
-        kept = list(kept) + list(editorial_candidates)
-
-    provisions = [c for c in kept if c.get("doc_type") != "editorial_note"]
-    editorial = [c for c in kept if c.get("doc_type") == "editorial_note"]
-
-    # Budget self-inflation: compute with provisions-only vs current inflated total
-    budget_provisions_only = budget_fn(total_docs=provisions_before_injection, retrieval_query=question)
-    budget_inflated = budget_fn(total_docs=len(kept), retrieval_query=question)
-
-    kept = provisions + editorial[:budget_provisions_only]
-    scores = [c["score"] for c in kept]
     provision_kept = [c for c in kept if c.get("doc_type") != "editorial_note"]
+    scores = [c["score"] for c in provision_kept]
     cited_ids = [c["article_id"] for c in provision_kept if c.get("article_id")]
     cited_sources = [
         {"law_id": c.get("law_id", ""), "article_id": c.get("article_id", "")}
         for c in provision_kept
         if c.get("article_id")
     ]
-    cited_editorial = any(c.get("doc_type") == "editorial_note" for c in kept)
+    cited_editorial = _has_attached_editorial(provision_kept, editorial_candidates)
     top_score = scores[0] if scores else None
 
     precision = 0.0
@@ -187,10 +149,7 @@ def _compute_per_question_metrics(
         "unexpected_rate": unexpected_rate,
         "cited_editorial": cited_editorial,
         "expects_editorial_context": expects_editorial_context,
-        "budget_provisions_only": budget_provisions_only,
-        "budget_inflated": budget_inflated,
-        "n_provisions": provisions_before_injection,
-        "n_editorial_injected": len(editorial_candidates) if editorial_candidates else 0,
+        "top_score": top_score,
     }
 
 
@@ -200,7 +159,6 @@ def run_benchmark(chain_or_settings, cached_candidates: list[dict]) -> dict:
     Returns aggregates and per-question deltas.
     chain_or_settings: LegalRAGChain (live) or Settings (offline/cache mode).
     """
-    budget_fn = _make_budget_fn(chain_or_settings)
     settings_obj = getattr(chain_or_settings, "settings", chain_or_settings)
     min_sources = getattr(settings_obj, "reranker_min_sources", 2)
     if hasattr(chain_or_settings, "settings"):
@@ -219,13 +177,13 @@ def run_benchmark(chain_or_settings, cached_candidates: list[dict]) -> dict:
 
     for row in cached_candidates:
         m_off = _compute_per_question_metrics(
-            row, budget_fn, min_sources, editorial_candidates=[]
+            row, min_sources, editorial_candidates=[]
         )
         m_off["id"] = row.get("id")
         per_question_off.append(m_off)
 
         m_on = _compute_per_question_metrics(
-            row, budget_fn, min_sources, editorial_candidates=row.get("editorial_candidates", [])
+            row, min_sources, editorial_candidates=row.get("editorial_candidates", [])
         )
         m_on["id"] = row.get("id")
         per_question_on.append(m_on)
@@ -249,12 +207,6 @@ def run_benchmark(chain_or_settings, cached_candidates: list[dict]) -> dict:
     non_editorial_clean_on = sum(1 for r in per_question_on if r["id"] in non_editorial_ids and not r["cited_editorial"])
     non_editorial_total = len(non_editorial_rows)
 
-    # Budget self-inflation (only where editorial was injected)
-    budget_provisions_only_vals = [r["budget_provisions_only"] for r in per_question_on if r["n_editorial_injected"] > 0]
-    budget_inflated_vals = [r["budget_inflated"] for r in per_question_on if r["n_editorial_injected"] > 0]
-    mean_budget_provisions = sum(budget_provisions_only_vals) / len(budget_provisions_only_vals) if budget_provisions_only_vals else 0
-    mean_budget_inflated = sum(budget_inflated_vals) / len(budget_inflated_vals) if budget_inflated_vals else 0
-
     # Per-question precision deltas (only positive questions)
     deltas = []
     for po, pn in zip(per_question_off, per_question_on):
@@ -276,8 +228,6 @@ def run_benchmark(chain_or_settings, cached_candidates: list[dict]) -> dict:
         "non_editorial_clean_off": non_editorial_clean_off,
         "non_editorial_clean_on": non_editorial_clean_on,
         "non_editorial_total": non_editorial_total,
-        "mean_budget_provisions_only": mean_budget_provisions,
-        "mean_budget_inflated": mean_budget_inflated,
         "deltas": deltas,
         "n_expect_editorial": sum(1 for r in cached_candidates if r.get("expects_editorial_context")),
         "n_positive": len(positive_ids),
@@ -301,10 +251,6 @@ def print_report(result: dict) -> None:
     nec_off, nec_on = r["non_editorial_clean_off"], r["non_editorial_clean_on"]
     nec_tot = r["non_editorial_total"]
     print(f"{'non_editorial_clean':<25} | {nec_off:>6}/{nec_tot:<6} | {nec_on:>6}/{nec_tot:<6} |")
-    print()
-    print("--- Budget self-inflation ---")
-    print(f"Mean budget (provisions-only base): {r['mean_budget_provisions_only']:.1f}")
-    print(f"Mean budget (current inflated base): {r['mean_budget_inflated']:.1f}")
     print()
     print("--- Worst precision regressions (editorial ON vs OFF) ---")
     for d in r["deltas"][:15]:

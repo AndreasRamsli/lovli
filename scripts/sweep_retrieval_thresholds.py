@@ -95,6 +95,31 @@ def _env_flag(name: str, default: bool) -> bool:
     return default
 
 
+def _has_attached_editorial(provision_rows: list[dict], editorial_candidates: list[dict]) -> bool:
+    """Return True when any kept provision has linked/chapter editorial candidates."""
+    if not provision_rows or not editorial_candidates:
+        return False
+    provision_article_pairs = {
+        ((row.get("law_id") or "").strip(), (row.get("article_id") or "").strip())
+        for row in provision_rows
+        if (row.get("law_id") or "").strip() and (row.get("article_id") or "").strip()
+    }
+    provision_chapter_pairs = {
+        ((row.get("law_id") or "").strip(), (row.get("chapter_id") or "").strip())
+        for row in provision_rows
+        if (row.get("law_id") or "").strip() and (row.get("chapter_id") or "").strip()
+    }
+    for candidate in editorial_candidates:
+        law_id = (candidate.get("law_id") or "").strip()
+        linked = (candidate.get("linked_provision_id") or "").strip()
+        chapter_id = (candidate.get("chapter_id") or "").strip()
+        if law_id and linked and (law_id, linked) in provision_article_pairs:
+            return True
+        if law_id and chapter_id and (law_id, chapter_id) in provision_chapter_pairs:
+            return True
+    return False
+
+
 def precompute_candidates(
     chain: LegalRAGChain,
     questions: list[dict],
@@ -139,6 +164,7 @@ def precompute_candidates(
                         "law_id": metadata.get("law_id", ""),
                         "article_id": metadata.get("article_id", ""),
                         "chapter_id": metadata.get("chapter_id", ""),
+                        "linked_provision_id": metadata.get("linked_provision_id"),
                         "doc_type": _infer_doc_type(metadata),
                         "score": score,
                     }
@@ -157,6 +183,7 @@ def precompute_candidates(
                     "law_id": metadata.get("law_id", ""),
                     "article_id": metadata.get("article_id", ""),
                     "chapter_id": metadata.get("chapter_id", ""),
+                    "linked_provision_id": metadata.get("linked_provision_id"),
                     "doc_type": _infer_doc_type(metadata),
                     "score": 0.0,
                 }
@@ -246,27 +273,17 @@ def evaluate_combo(
         kept = [c for c in ranked if c["score"] >= min_doc_score]
         if len(kept) < min(min_sources, len(ranked)):
             kept = ranked[: min(min_sources, len(ranked))]
-        if editorial_candidates:
-            kept = list(kept) + list(editorial_candidates)
-
-        # Simulate runtime doc-type prioritization and editorial budgeting.
-        provisions = [c for c in kept if c.get("doc_type") != "editorial_note"]
-        editorial = [c for c in kept if c.get("doc_type") == "editorial_note"]
-        editorial_budget = chain._compute_editorial_budget(total_docs=len(provisions), retrieval_query=question)
-        kept = provisions + editorial[:editorial_budget]
-
-        scores = [c["score"] for c in kept]
+        # Attachment model: editorial candidates are attached to provision rows,
+        # not appended as standalone documents.
         provision_kept = [c for c in kept if c.get("doc_type") != "editorial_note"]
+        scores = [c["score"] for c in provision_kept]
         cited_ids = [c["article_id"] for c in provision_kept if c.get("article_id")]
         cited_sources = [
             {"law_id": c.get("law_id", ""), "article_id": c.get("article_id", "")}
             for c in provision_kept
             if c.get("article_id")
         ]
-        cited_editorial = any(
-            c.get("doc_type") == "editorial_note"
-            for c in kept
-        )
+        cited_editorial = _has_attached_editorial(provision_kept, editorial_candidates)
         top_score = scores[0] if scores else None
 
         if top_score is not None:
