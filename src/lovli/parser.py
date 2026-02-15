@@ -44,6 +44,7 @@ class LegalArticle:
     source_anchor_id: str | None = None
     doc_type: str = "provision"
     linked_provision_id: str | None = None
+    editorial_notes: list[dict] = field(default_factory=list)
 
 
 def _extract_law_ref_from_filename(filename: str) -> str:
@@ -540,6 +541,116 @@ def parse_xml_file(xml_path: Path) -> Iterator[LegalArticle]:
         raise ValueError(f"Path is not a file: {xml_path}")
 
     yield from _parse_lovdata_html(xml_path)
+
+
+def _build_editorial_note_payload(
+    article: LegalArticle,
+    editorial_note_max_chars: int | None = None,
+) -> dict[str, str | None]:
+    """Normalize an editorial note into a compact, deterministic payload shape."""
+    content = (article.content or "").strip()
+    if editorial_note_max_chars and editorial_note_max_chars > 0:
+        content = content[:editorial_note_max_chars]
+    return {
+        "article_id": article.article_id,
+        "content": content,
+        "title": article.title,
+        "source_anchor_id": article.source_anchor_id,
+        "url": article.url,
+        "chapter_id": article.chapter_id,
+    }
+
+
+def _sort_and_dedupe_editorial_payloads(
+    notes: list[dict[str, str | None]],
+    per_provision_cap: int | None = None,
+) -> list[dict[str, str | None]]:
+    """Sort and dedupe editorial note payloads deterministically."""
+    ordered = sorted(
+        notes,
+        key=lambda note: (
+            (note.get("source_anchor_id") or ""),
+            (note.get("article_id") or ""),
+            (note.get("content") or ""),
+        ),
+    )
+    deduped: list[dict[str, str | None]] = []
+    seen: set[tuple[str, str]] = set()
+    for note in ordered:
+        key = ((note.get("article_id") or "").strip(), (note.get("content") or "").strip())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(note)
+    if per_provision_cap and per_provision_cap > 0:
+        return deduped[:per_provision_cap]
+    return deduped
+
+
+def parse_xml_file_grouped(
+    xml_path: Path,
+    per_provision_cap: int | None = None,
+    editorial_note_max_chars: int | None = None,
+) -> Iterator[LegalArticle]:
+    """
+    Parse a Lovdata file and yield provisions with attached editorial notes.
+
+    Editorial notes are grouped at parse-time and emitted under each provision
+    as `editorial_notes` payload data. Standalone editorial-note articles are
+    not yielded from this iterator.
+    """
+    articles = list(parse_xml_file(xml_path))
+    if not articles:
+        return
+
+    provisions = [article for article in articles if article.doc_type == "provision"]
+    if not provisions:
+        return
+
+    linked_notes: dict[tuple[str, str], list[dict[str, str | None]]] = {}
+    chapter_fallback_notes: dict[tuple[str, str], list[dict[str, str | None]]] = {}
+    chapter_provision_counts: dict[tuple[str, str], int] = {}
+
+    for provision in provisions:
+        chapter_key = ((provision.law_id or "").strip(), (provision.chapter_id or "").strip())
+        if chapter_key[0] and chapter_key[1]:
+            chapter_provision_counts[chapter_key] = chapter_provision_counts.get(chapter_key, 0) + 1
+
+    for article in articles:
+        if article.doc_type != "editorial_note":
+            continue
+        note_payload = _build_editorial_note_payload(
+            article,
+            editorial_note_max_chars=editorial_note_max_chars,
+        )
+        law_id = (article.law_id or "").strip()
+        linked_provision_id = (article.linked_provision_id or "").strip()
+        chapter_id = (article.chapter_id or "").strip()
+        if law_id and linked_provision_id:
+            linked_notes.setdefault((law_id, linked_provision_id), []).append(note_payload)
+            continue
+        if law_id and chapter_id:
+            chapter_fallback_notes.setdefault((law_id, chapter_id), []).append(note_payload)
+
+    for provision in provisions:
+        law_id = (provision.law_id or "").strip()
+        article_id = (provision.article_id or "").strip()
+        chapter_id = (provision.chapter_id or "").strip()
+
+        notes = list(linked_notes.get((law_id, article_id), []))
+        chapter_key = (law_id, chapter_id)
+        if (
+            not notes
+            and law_id
+            and chapter_id
+            and chapter_provision_counts.get(chapter_key, 0) == 1
+        ):
+            notes = list(chapter_fallback_notes.get(chapter_key, []))
+        provision.editorial_notes = _sort_and_dedupe_editorial_payloads(
+            notes,
+            per_provision_cap=per_provision_cap,
+        )
+        yield provision
 
 
 def parse_law_header(xml_path: Path) -> dict:

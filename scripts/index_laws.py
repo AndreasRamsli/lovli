@@ -30,7 +30,7 @@ from dotenv import load_dotenv
 load_dotenv(root_dir / ".env")
 
 from lovli.indexer import LegalIndexer
-from lovli.parser import parse_xml_file
+from lovli.parser import parse_xml_file_grouped
 
 # Configure logging
 logging.basicConfig(
@@ -109,7 +109,13 @@ def main():
     for file_path in files:
         try:
             logger.info(f"Parsing {file_path.name}...")
-            count = indexer.index_articles(parse_xml_file(file_path))
+            count = indexer.index_articles(
+                parse_xml_file_grouped(
+                    file_path,
+                    per_provision_cap=indexer.settings.editorial_notes_per_provision_cap,
+                    editorial_note_max_chars=indexer.settings.editorial_note_max_chars,
+                )
+            )
             if count == 0:
                 logger.warning(f"No articles indexed from {file_path.name}")
                 continue

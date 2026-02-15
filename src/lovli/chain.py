@@ -67,16 +67,58 @@ def _infer_doc_type(metadata: Dict[str, Any]) -> str:
 def _editorial_note_payload(doc: Document) -> Dict[str, Any]:
     """Normalize an editorial note document into a compact metadata payload."""
     metadata = doc.metadata if hasattr(doc, "metadata") else {}
+    content = (doc.page_content if hasattr(doc, "page_content") else "") or ""
     return {
-        "law_id": metadata.get("law_id", ""),
         "article_id": metadata.get("article_id", ""),
-        "linked_provision_id": metadata.get("linked_provision_id"),
-        "chapter_id": metadata.get("chapter_id"),
+        "content": content.strip(),
         "title": metadata.get("title", ""),
-        "url": metadata.get("url"),
         "source_anchor_id": metadata.get("source_anchor_id"),
-        "content": doc.page_content if hasattr(doc, "page_content") else "",
+        "url": metadata.get("url"),
+        "chapter_id": metadata.get("chapter_id"),
     }
+
+
+def _normalize_editorial_notes(
+    notes: list[Dict[str, Any]],
+    max_notes: int,
+    max_chars: int,
+) -> list[Dict[str, Any]]:
+    """Apply editorial note payload contract, dedupe, and deterministic ordering."""
+    normalized: list[Dict[str, Any]] = []
+    for note in notes or []:
+        article_id = (note.get("article_id") or "").strip()
+        content = (note.get("content") or "").strip()
+        if max_chars > 0:
+            content = content[:max_chars]
+        if not article_id or not content:
+            continue
+        normalized.append(
+            {
+                "article_id": article_id,
+                "content": content,
+                "title": note.get("title"),
+                "source_anchor_id": note.get("source_anchor_id"),
+                "url": note.get("url"),
+                "chapter_id": note.get("chapter_id"),
+            }
+        )
+
+    normalized.sort(
+        key=lambda item: (
+            (item.get("source_anchor_id") or ""),
+            (item.get("article_id") or ""),
+            (item.get("content") or ""),
+        )
+    )
+    deduped: list[Dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for note in normalized:
+        key = ((note.get("article_id") or "").strip(), (note.get("content") or "").strip())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(note)
+    return deduped[:max_notes] if max_notes > 0 else deduped
 
 
 class LegalRAGChain:
@@ -232,7 +274,11 @@ Kontekst fra lovtekster:
                 f"Lov: {source.get('law_title', 'Unknown')} (§ {source.get('article_id', 'Unknown')})\n"
                 f"{source.get('content', '')}"
             )
-            editorial_notes = source.get("editorial_notes") or []
+            editorial_notes = _normalize_editorial_notes(
+                source.get("editorial_notes") or [],
+                max_notes=self.settings.editorial_notes_per_provision_cap,
+                max_chars=self.settings.editorial_note_max_chars,
+            )
             if editorial_notes:
                 history_lines = []
                 for note in editorial_notes:
@@ -276,7 +322,11 @@ Kontekst fra lovtekster:
                     "url": metadata.get("url"),
                     "source_anchor_id": metadata.get("source_anchor_id"),
                     "doc_type": _infer_doc_type(metadata),
-                    "editorial_notes": metadata.get("editorial_notes", []),
+                    "editorial_notes": _normalize_editorial_notes(
+                        metadata.get("editorial_notes", []) or [],
+                        max_notes=self.settings.editorial_notes_per_provision_cap,
+                        max_chars=self.settings.editorial_note_max_chars,
+                    ),
                 }
                 if include_content:
                     source["content"] = doc.page_content if hasattr(doc, "page_content") else ""
@@ -431,7 +481,7 @@ Kontekst fra lovtekster:
     def _attach_editorial_to_provisions(
         self, docs: list, scores: list[float] | None = None
     ) -> tuple[list, list[float]]:
-        """Attach editorial notes to parent provisions and keep score alignment."""
+        """Keep provisions only and normalize attached editorial payloads."""
         if not docs:
             return docs, scores or []
 
@@ -450,6 +500,21 @@ Kontekst fra lovtekster:
                 if _infer_doc_type(metadata) != "editorial_note":
                     provisions.append(doc)
         if not provisions:
+            return provisions, provision_scores if has_aligned_scores else []
+
+        has_inline_payload = False
+        for provision_doc in provisions:
+            p_meta = provision_doc.metadata if hasattr(provision_doc, "metadata") else {}
+            normalized = _normalize_editorial_notes(
+                p_meta.get("editorial_notes", []) or [],
+                max_notes=self.settings.editorial_notes_per_provision_cap,
+                max_chars=self.settings.editorial_note_max_chars,
+            )
+            if normalized:
+                has_inline_payload = True
+            p_meta["editorial_notes"] = normalized
+
+        if has_inline_payload or not self.settings.editorial_v2_compat_mode:
             return provisions, provision_scores if has_aligned_scores else []
 
         editorial_by_provision: Dict[tuple[str, str], list[Dict[str, Any]]] = {}
@@ -497,7 +562,11 @@ Kontekst fra lovtekster:
                 and len(chapter_to_provision_keys.get(chapter_key, [])) == 1
             ):
                 notes = list(editorial_by_chapter.get(chapter_key, []))
-            p_meta["editorial_notes"] = notes
+            p_meta["editorial_notes"] = _normalize_editorial_notes(
+                notes,
+                max_notes=self.settings.editorial_notes_per_provision_cap,
+                max_chars=self.settings.editorial_note_max_chars,
+            )
         return provisions, provision_scores if has_aligned_scores else []
 
     def _prioritize_doc_types(

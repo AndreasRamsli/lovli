@@ -5,7 +5,7 @@ Validate post-reindex metadata completeness and retrieval behavior.
 Checks:
 - metadata.doc_type exists on all indexed points
 - doc_type distribution sanity (provision/editorial_note)
-- linked_provision_id coverage for editorial_note payloads
+- editorial notes payload coverage on provision points
 - retrieval smoke checks keep provisions ahead of editorial notes
 
 Usage:
@@ -66,7 +66,8 @@ def scan_doc_type_metrics(client: QdrantClient, collection_name: str) -> dict[st
     missing_doc_type = 0
     provision_count = 0
     editorial_note_count = 0
-    editorial_with_linkage = 0
+    provisions_with_editorial_payload = 0
+    total_editorial_notes_in_payload = 0
     other_doc_type_count = 0
 
     while True:
@@ -91,8 +92,11 @@ def scan_doc_type_metrics(client: QdrantClient, collection_name: str) -> dict[st
                 provision_count += 1
             elif doc_type == "editorial_note":
                 editorial_note_count += 1
-                if (metadata.get("linked_provision_id") or "").strip():
-                    editorial_with_linkage += 1
+            if doc_type == "provision":
+                notes = metadata.get("editorial_notes") or []
+                if notes:
+                    provisions_with_editorial_payload += 1
+                    total_editorial_notes_in_payload += len(notes)
             else:
                 other_doc_type_count += 1
 
@@ -104,7 +108,8 @@ def scan_doc_type_metrics(client: QdrantClient, collection_name: str) -> dict[st
         "missing_doc_type": missing_doc_type,
         "provision_count": provision_count,
         "editorial_note_count": editorial_note_count,
-        "editorial_with_linkage": editorial_with_linkage,
+        "provisions_with_editorial_payload": provisions_with_editorial_payload,
+        "total_editorial_notes_in_payload": total_editorial_notes_in_payload,
         "other_doc_type_count": other_doc_type_count,
     }
 
@@ -130,6 +135,7 @@ def run_retrieval_smoke_checks() -> list[dict[str, object]]:
                 "query": query,
                 "sources_count": len(sources),
                 "doc_types": doc_types,
+                "has_editorial_doc_type": any(doc_type == "editorial_note" for doc_type in doc_types),
                 "provision_after_editorial": provision_after_editorial,
             }
         )
@@ -168,15 +174,24 @@ def main() -> None:
     logger.info("provision_count=%s", metrics["provision_count"])
     logger.info("editorial_note_count=%s", metrics["editorial_note_count"])
     if metrics["editorial_note_count"] > 0:
-        coverage = metrics["editorial_with_linkage"] / metrics["editorial_note_count"]
-        logger.info(
-            "editorial_linkage_coverage=%s/%s (%.2f%%)",
-            metrics["editorial_with_linkage"],
+        logger.warning(
+            "Expected 0 standalone editorial_note points for v3, found %s.",
             metrics["editorial_note_count"],
+        )
+    if metrics["provision_count"] > 0:
+        coverage = metrics["provisions_with_editorial_payload"] / metrics["provision_count"]
+        logger.info(
+            "editorial_notes_payload_coverage=%s/%s (%.2f%%)",
+            metrics["provisions_with_editorial_payload"],
+            metrics["provision_count"],
             coverage * 100.0,
         )
+        logger.info(
+            "total_editorial_notes_in_payload=%s",
+            metrics["total_editorial_notes_in_payload"],
+        )
     else:
-        logger.info("editorial_linkage_coverage=0/0 (no editorial notes)")
+        logger.info("editorial_notes_payload_coverage=0/0 (no provisions)")
     logger.info("other_doc_type_count=%s", metrics["other_doc_type_count"])
 
     if args.with_smoke:
@@ -194,6 +209,12 @@ def main() -> None:
             logger.warning(
                 "Detected %s ordering violations where a provision appears after an editorial note.",
                 len(violations),
+            )
+        editorial_type_violations = [r for r in smoke_results if r["has_editorial_doc_type"]]
+        if editorial_type_violations:
+            logger.warning(
+                "Detected %s smoke results containing editorial_note doc_type in retrieved sources.",
+                len(editorial_type_violations),
             )
     else:
         logger.info("Smoke checks skipped (use --with-smoke to enable).")

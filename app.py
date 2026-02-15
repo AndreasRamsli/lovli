@@ -270,7 +270,8 @@ if prompt:
                                     "article_id": note.get("article_id"),
                                     "title": note.get("title"),
                                     "url": note.get("url"),
-                                    "linked_provision_id": note.get("linked_provision_id"),
+                                    "source_anchor_id": note.get("source_anchor_id"),
+                                    "chapter_id": note.get("chapter_id"),
                                 }
                                 for note in (s.get("editorial_notes") or [])
                             ],

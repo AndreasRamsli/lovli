@@ -25,10 +25,6 @@ sys.path.insert(0, str(ROOT_DIR / "src"))
 
 from lovli.chain import LegalRAGChain, _infer_doc_type  # noqa: E402
 from lovli.config import get_settings  # noqa: E402
-from lovli.editorial import (  # noqa: E402
-    collect_provision_article_pairs,
-    collect_provision_law_chapter_pairs,
-)
 from lovli.eval_utils import infer_negative_type, validate_questions  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -95,27 +91,12 @@ def _env_flag(name: str, default: bool) -> bool:
     return default
 
 
-def _has_attached_editorial(provision_rows: list[dict], editorial_candidates: list[dict]) -> bool:
-    """Return True when any kept provision has linked/chapter editorial candidates."""
-    if not provision_rows or not editorial_candidates:
-        return False
-    provision_article_pairs = {
-        ((row.get("law_id") or "").strip(), (row.get("article_id") or "").strip())
-        for row in provision_rows
-        if (row.get("law_id") or "").strip() and (row.get("article_id") or "").strip()
-    }
-    provision_chapter_pairs = {
-        ((row.get("law_id") or "").strip(), (row.get("chapter_id") or "").strip())
-        for row in provision_rows
-        if (row.get("law_id") or "").strip() and (row.get("chapter_id") or "").strip()
-    }
-    for candidate in editorial_candidates:
-        law_id = (candidate.get("law_id") or "").strip()
-        linked = (candidate.get("linked_provision_id") or "").strip()
-        chapter_id = (candidate.get("chapter_id") or "").strip()
-        if law_id and linked and (law_id, linked) in provision_article_pairs:
+def _has_attached_editorial(provision_rows: list[dict]) -> bool:
+    """Return True when any kept provision already carries editorial payload."""
+    for candidate in provision_rows or []:
+        if bool(candidate.get("has_editorial_notes")):
             return True
-        if law_id and chapter_id and (law_id, chapter_id) in provision_chapter_pairs:
+        if (candidate.get("editorial_notes_count") or 0) > 0:
             return True
     return False
 
@@ -164,30 +145,12 @@ def precompute_candidates(
                         "law_id": metadata.get("law_id", ""),
                         "article_id": metadata.get("article_id", ""),
                         "chapter_id": metadata.get("chapter_id", ""),
-                        "linked_provision_id": metadata.get("linked_provision_id"),
                         "doc_type": _infer_doc_type(metadata),
+                        "has_editorial_notes": bool(metadata.get("editorial_notes")),
+                        "editorial_notes_count": len(metadata.get("editorial_notes") or []),
                         "score": score,
                     }
                 )
-
-        provision_pairs = collect_provision_article_pairs(candidates)
-        editorial_docs = chain._fetch_editorial_for_provisions(provision_pairs)
-        if not editorial_docs:
-            law_chapter_pairs = collect_provision_law_chapter_pairs(candidates)
-            editorial_docs = chain._fetch_editorial_for_chapters(law_chapter_pairs, per_chapter_cap=2)
-        editorial_candidates = []
-        for doc in editorial_docs:
-            metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
-            editorial_candidates.append(
-                {
-                    "law_id": metadata.get("law_id", ""),
-                    "article_id": metadata.get("article_id", ""),
-                    "chapter_id": metadata.get("chapter_id", ""),
-                    "linked_provision_id": metadata.get("linked_provision_id"),
-                    "doc_type": _infer_doc_type(metadata),
-                    "score": 0.0,
-                }
-            )
 
         cached.append(
             {
@@ -200,7 +163,6 @@ def precompute_candidates(
                 "negative_type": infer_negative_type(row),
                 "is_core": row.get("id") in CORE_QUESTION_IDS,
                 "candidates": candidates,
-                "editorial_candidates": editorial_candidates,
             }
         )
     return cached
@@ -258,7 +220,6 @@ def evaluate_combo(
         expected = set(row.get("expected_articles", []))
         expected_sources = row.get("expected_sources", []) or []
         candidates = row.get("candidates", [])
-        editorial_candidates = row.get("editorial_candidates", [])
         question = row.get("question", "")
         case_type = row.get("case_type", "single_article")
         negative_type = row.get("negative_type", "unknown")
@@ -283,7 +244,7 @@ def evaluate_combo(
             for c in provision_kept
             if c.get("article_id")
         ]
-        cited_editorial = _has_attached_editorial(provision_kept, editorial_candidates)
+        cited_editorial = _has_attached_editorial(provision_kept)
         top_score = scores[0] if scores else None
 
         if top_score is not None:

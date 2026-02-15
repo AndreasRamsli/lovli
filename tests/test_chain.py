@@ -31,10 +31,9 @@ def mock_settings():
     settings.reranker_ambiguity_gating_enabled = True
     settings.reranker_ambiguity_min_gap = 0.08
     settings.reranker_ambiguity_top_score_ceiling = 0.65
-    settings.editorial_base_max_notes = 2
-    settings.editorial_max_notes = 4
-    settings.editorial_context_budget_ratio = 0.4
-    settings.editorial_history_intent_boost = 1
+    settings.editorial_notes_per_provision_cap = 3
+    settings.editorial_note_max_chars = 600
+    settings.editorial_v2_compat_mode = True
     settings.law_routing_enabled = False
     settings.law_catalog_path = "data/law_catalog.json"
     settings.law_routing_max_candidates = 3
@@ -351,7 +350,7 @@ def test_attach_editorial_to_provisions_includes_linked_notes(mock_settings):
         assert attached[0].metadata["article_id"] == "kapittel-9-paragraf-6"
         notes = attached[0].metadata.get("editorial_notes", [])
         assert len(notes) == 1
-        assert notes[0]["linked_provision_id"] == "kapittel-9-paragraf-6"
+        assert "linked_provision_id" not in notes[0]
 
 
 def test_attach_editorial_to_provisions_keeps_score_alignment(mock_settings):
@@ -504,3 +503,30 @@ def test_attach_editorial_chapter_fallback_skips_ambiguous_chapter(mock_settings
         attached, _ = chain._attach_editorial_to_provisions([p1, p2], scores=[0.8, 0.7])
         assert attached[0].metadata.get("editorial_notes") == []
         assert attached[1].metadata.get("editorial_notes") == []
+
+
+def test_attach_editorial_skips_v2_fetch_when_compat_disabled(mock_settings):
+    """When compat mode is off, attachment should not trigger runtime fetch methods."""
+    mock_settings.editorial_v2_compat_mode = False
+    with patch('lovli.chain.QdrantVectorStore'), \
+         patch('lovli.chain.HuggingFaceEmbeddings'), \
+         patch('lovli.chain.ChatOpenAI'), \
+         patch('lovli.chain.QdrantClient'):
+        chain = LegalRAGChain(mock_settings)
+        provision_doc = Mock(
+            metadata={
+                "law_id": "nl-19990326-017",
+                "chapter_id": "kapittel-9",
+                "article_id": "kapittel-9-paragraf-6",
+                "doc_type": "provision",
+            },
+            page_content="Oppsigelsesfristen er tre måneder.",
+        )
+        chain._fetch_editorial_for_provisions = MagicMock(return_value=[])
+        chain._fetch_editorial_for_chapters = MagicMock(return_value=[])
+
+        attached, _ = chain._attach_editorial_to_provisions([provision_doc])
+        assert len(attached) == 1
+        assert attached[0].metadata.get("editorial_notes") == []
+        assert not chain._fetch_editorial_for_provisions.called
+        assert not chain._fetch_editorial_for_chapters.called

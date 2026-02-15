@@ -123,29 +123,21 @@ class Settings(BaseSettings):
         description="Only apply ambiguity gating when top score is at or below this "
         "ceiling.",
     )
-    editorial_base_max_notes: int = Field(
-        default=2,
-        ge=0,
-        le=10,
-        description="Deprecated: legacy editorial slot budget baseline.",
-    )
-    editorial_max_notes: int = Field(
-        default=4,
-        ge=0,
+    editorial_notes_per_provision_cap: int = Field(
+        default=3,
+        ge=1,
         le=20,
-        description="Deprecated: legacy editorial slot budget cap.",
+        description="Maximum editorial notes attached per provision.",
     )
-    editorial_context_budget_ratio: float = Field(
-        default=0.4,
-        ge=0.0,
-        le=1.0,
-        description="Deprecated: legacy editorial slot budget ratio.",
+    editorial_note_max_chars: int = Field(
+        default=600,
+        ge=100,
+        le=5000,
+        description="Maximum characters to keep per editorial note payload.",
     )
-    editorial_history_intent_boost: int = Field(
-        default=1,
-        ge=0,
-        le=10,
-        description="Deprecated: legacy editorial slot history-intent boost.",
+    editorial_v2_compat_mode: bool = Field(
+        default=True,
+        description="Allow runtime v2 editorial fetch fallback during migration.",
     )
 
     # Optional law routing (Tier 0 catalog)

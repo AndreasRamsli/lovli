@@ -4,6 +4,7 @@ import pytest
 from pathlib import Path
 from lovli.parser import (
     parse_xml_file,
+    parse_xml_file_grouped,
     parse_law_header,
     _extract_law_ref_from_filename,
     _extract_short_name,
@@ -284,6 +285,102 @@ def test_editorial_notes_link_to_preceding_provision(tmp_path):
     provision = next(a for a in articles if a.doc_type == "provision")
     editorial = next(a for a in articles if a.doc_type == "editorial_note")
     assert editorial.linked_provision_id == provision.article_id
+
+
+def test_parse_xml_file_grouped_attaches_linked_editorial(tmp_path):
+    """Grouped parser should emit provision rows with attached linked notes."""
+    sample = tmp_path / "nl-20990101-007.xml"
+    sample.write_text(
+        """
+        <html>
+          <body>
+            <dd class="title">Grouped editorial test</dd>
+            <section id="kapittel-9">
+              <h2>Kapittel 9. Opphør</h2>
+              <article id="kapittel-9-paragraf-6">
+                <h3>§ 9-6. Oppsigelsesfrist</h3>
+                <p>Oppsigelsesfristen er tre måneder.</p>
+              </article>
+              <article>
+                <p>Endret ved lov 16 jan 2009 nr. 6.</p>
+              </article>
+            </section>
+          </body>
+        </html>
+        """,
+        encoding="utf-8",
+    )
+
+    grouped = list(parse_xml_file_grouped(sample))
+    assert len(grouped) == 1
+    assert grouped[0].doc_type == "provision"
+    assert len(grouped[0].editorial_notes) == 1
+    note = grouped[0].editorial_notes[0]
+    assert note["article_id"]
+    assert "Endret ved lov" in note["content"]
+
+
+def test_parse_xml_file_grouped_chapter_fallback_single_provision(tmp_path):
+    """Unlinked editorial notes should attach via chapter fallback when unambiguous."""
+    sample = tmp_path / "nl-20990101-008.xml"
+    sample.write_text(
+        """
+        <html>
+          <body>
+            <dd class="title">Chapter fallback test</dd>
+            <section id="kapittel-1">
+              <h2>Kapittel 1. Innledende</h2>
+              <article id="kapittel-1-paragraf-1">
+                <h3>§ 1-1. Formål</h3>
+                <p>Denne loven gjelder.</p>
+              </article>
+              <article id="kapittel-1-art-note">
+                <p>Endret ved lov 1 jan 2024 nr. 1.</p>
+              </article>
+            </section>
+          </body>
+        </html>
+        """,
+        encoding="utf-8",
+    )
+
+    grouped = list(parse_xml_file_grouped(sample))
+    assert len(grouped) == 1
+    assert len(grouped[0].editorial_notes) == 1
+
+
+def test_parse_xml_file_grouped_chapter_fallback_skips_ambiguous(tmp_path):
+    """Chapter fallback should skip attachment when chapter has many provisions."""
+    sample = tmp_path / "nl-20990101-009.xml"
+    sample.write_text(
+        """
+        <html>
+          <body>
+            <dd class="title">Ambiguous chapter fallback test</dd>
+            <section id="kapittel-1">
+              <h2>Kapittel 1. Innledende</h2>
+              <article id="kapittel-1-art-note">
+                <p>Endret ved lov 1 jan 2024 nr. 1.</p>
+              </article>
+              <article id="kapittel-1-paragraf-1">
+                <h3>§ 1-1. Formål</h3>
+                <p>Denne loven gjelder.</p>
+              </article>
+              <article id="kapittel-1-paragraf-2">
+                <h3>§ 1-2. Virkeområde</h3>
+                <p>Denne paragrafen gjelder også.</p>
+              </article>
+            </section>
+          </body>
+        </html>
+        """,
+        encoding="utf-8",
+    )
+
+    grouped = list(parse_xml_file_grouped(sample))
+    assert len(grouped) == 2
+    assert grouped[0].editorial_notes == []
+    assert grouped[1].editorial_notes == []
 
 
 def test_header_article_count_matches_parser_output(tmp_path):

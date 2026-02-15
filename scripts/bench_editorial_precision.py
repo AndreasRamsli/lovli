@@ -57,33 +57,20 @@ def _matches_expected_source(cited_source: dict, expected_source: dict) -> bool:
     return cited_law == expected_law and cited_article.startswith(expected_article)
 
 
-def _has_attached_editorial(provision_rows: list[dict], editorial_candidates: list[dict]) -> bool:
-    """Return True when any kept provision has linked/chapter editorial candidates."""
-    if not provision_rows or not editorial_candidates:
-        return False
-    provision_article_pairs = {
-        ((row.get("law_id") or "").strip(), (row.get("article_id") or "").strip())
-        for row in provision_rows
-        if (row.get("law_id") or "").strip() and (row.get("article_id") or "").strip()
-    }
-    provision_chapter_pairs = {
-        ((row.get("law_id") or "").strip(), (row.get("chapter_id") or "").strip())
-        for row in provision_rows
-        if (row.get("law_id") or "").strip() and (row.get("chapter_id") or "").strip()
-    }
-    for candidate in editorial_candidates:
-        law_id = (candidate.get("law_id") or "").strip()
-        linked = (candidate.get("linked_provision_id") or "").strip()
-        chapter_id = (candidate.get("chapter_id") or "").strip()
-        if law_id and linked and (law_id, linked) in provision_article_pairs:
+def _has_attached_editorial(provision_rows: list[dict]) -> bool:
+    """Return True when any kept provision carries editorial payload."""
+    for row in provision_rows or []:
+        if bool(row.get("has_editorial_notes")):
             return True
-        if law_id and chapter_id and (law_id, chapter_id) in provision_chapter_pairs:
+        if (row.get("editorial_notes_count") or 0) > 0:
             return True
     return False
 
 
 def _compute_per_question_metrics(
-    row: dict, min_sources: int, editorial_candidates: list
+    row: dict,
+    min_sources: int,
+    include_editorial: bool,
 ) -> dict:
     """
     Simulate retrieval for one question and return precision, unexpected_rate, cited_editorial,
@@ -110,7 +97,7 @@ def _compute_per_question_metrics(
         for c in provision_kept
         if c.get("article_id")
     ]
-    cited_editorial = _has_attached_editorial(provision_kept, editorial_candidates)
+    cited_editorial = _has_attached_editorial(provision_kept) if include_editorial else False
     top_score = scores[0] if scores else None
 
     precision = 0.0
@@ -177,13 +164,13 @@ def run_benchmark(chain_or_settings, cached_candidates: list[dict]) -> dict:
 
     for row in cached_candidates:
         m_off = _compute_per_question_metrics(
-            row, min_sources, editorial_candidates=[]
+            row, min_sources, include_editorial=False
         )
         m_off["id"] = row.get("id")
         per_question_off.append(m_off)
 
         m_on = _compute_per_question_metrics(
-            row, min_sources, editorial_candidates=row.get("editorial_candidates", [])
+            row, min_sources, include_editorial=True
         )
         m_on["id"] = row.get("id")
         per_question_on.append(m_on)
