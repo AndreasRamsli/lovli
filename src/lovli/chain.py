@@ -21,7 +21,9 @@ from .editorial import (
     dedupe_by_law_article,
 )
 from .retrieval_shared import (
+    build_law_cross_reference_affinity,
     build_law_coherence_decision,
+    normalize_law_ref,
     normalize_sigmoid_scores,
     sigmoid,
 )
@@ -266,12 +268,18 @@ Kontekst fra lovtekster:
         # Optional Tier-0 law catalog for lightweight routing before retrieval.
         self._law_catalog: list[dict[str, Any]] = []
         self._law_catalog_entries: list[dict[str, Any]] = []
+        self._law_ref_to_id: dict[str, str] = {}
         self._last_routing_diagnostics: dict[str, Any] = {}
         self._last_coherence_diagnostics: dict[str, Any] = {}
         if self.settings.law_routing_enabled:
             try:
                 self._law_catalog = load_catalog(Path(self.settings.law_catalog_path))
                 self._law_catalog_entries = self._build_routing_entries(self._law_catalog)
+                self._law_ref_to_id = {
+                    normalize_law_ref(item.get("law_ref") or ""): (item.get("law_id") or "").strip()
+                    for item in self._law_catalog
+                    if normalize_law_ref(item.get("law_ref") or "") and (item.get("law_id") or "").strip()
+                }
                 logger.info(
                     "Loaded law catalog for routing: %s entries from %s",
                     len(self._law_catalog),
@@ -295,7 +303,20 @@ Kontekst fra lovtekster:
             short_name = (item.get("law_short_name") or "").strip()
             summary = (item.get("summary") or "").strip()
             law_ref = (item.get("law_ref") or "").strip()
-            routing_text = " ".join(part for part in [title, short_name, summary, law_ref] if part)
+            legal_area = (item.get("legal_area") or "").strip()
+            chapter_titles = item.get("chapter_titles") or []
+            if not isinstance(chapter_titles, list):
+                chapter_titles = [str(chapter_titles)]
+            chapter_titles_text = " ".join(
+                chapter_title.strip()
+                for chapter_title in chapter_titles[:5]
+                if isinstance(chapter_title, str) and chapter_title.strip()
+            )
+            routing_text = " ".join(
+                part
+                for part in [title, short_name, summary, law_ref, legal_area, chapter_titles_text]
+                if part
+            )
             entries.append(
                 {
                     "law_id": law_id,
@@ -1061,9 +1082,19 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
                     "index": idx,
                     "law_id": (metadata.get("law_id") or "").strip(),
                     "score": float(scores[idx]),
+                    "cross_references": metadata.get("cross_references") or [],
                 }
             )
-        decision = build_law_coherence_decision(candidates, self.settings)
+        law_affinity = build_law_cross_reference_affinity(
+            candidates,
+            law_ref_to_id=self._law_ref_to_id,
+            settings=self.settings,
+        )
+        decision = build_law_coherence_decision(
+            candidates,
+            self.settings,
+            law_affinity_by_id=law_affinity,
+        )
         drop_indices: set[int] = set(decision.get("drop_indices", set()))
 
         if not drop_indices:
@@ -1074,6 +1105,8 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
                     "dominant_avg_score": decision.get("dominant_avg_score"),
                     "dominant_max_score": decision.get("dominant_max_score"),
                     "dominant_strength": decision.get("dominant_strength"),
+                    "dominant_concentration": decision.get("dominant_concentration"),
+                    "cross_reference_affinity": law_affinity,
                     "decisions": decision.get("decisions", []),
                     "removed_count": 0,
                 }
@@ -1089,8 +1122,10 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
                 "dominant_avg_score": decision.get("dominant_avg_score"),
                 "dominant_max_score": decision.get("dominant_max_score"),
                 "dominant_strength": decision.get("dominant_strength"),
+                "dominant_concentration": decision.get("dominant_concentration"),
                 "min_sources_floor": decision.get("min_sources_floor"),
                 "removed_count": len(drop_indices),
+                "cross_reference_affinity": law_affinity,
                 "decisions": decision.get("decisions", []),
             }
         )

@@ -15,6 +15,7 @@ TRUST_PROFILES: dict[str, dict[str, Any]] = {
         "reranker_ambiguity_min_gap": 0.05,
         "reranker_ambiguity_top_score_ceiling": 0.70,
         "law_routing_fallback_unfiltered": True,
+        "law_coherence_dominant_concentration_threshold": 0.60,
     },
     "strict_v1": {
         "trust_profile_name": "strict_v1",
@@ -25,6 +26,7 @@ TRUST_PROFILES: dict[str, dict[str, Any]] = {
         "reranker_ambiguity_min_gap": 0.10,
         "reranker_ambiguity_top_score_ceiling": 0.70,
         "law_routing_fallback_unfiltered": False,
+        "law_coherence_dominant_concentration_threshold": 0.70,
     },
 }
 

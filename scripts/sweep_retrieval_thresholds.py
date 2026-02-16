@@ -26,6 +26,7 @@ from lovli.chain import LegalRAGChain, _infer_doc_type  # noqa: E402
 from lovli.config import get_settings  # noqa: E402
 from lovli.eval_utils import infer_negative_type, validate_questions  # noqa: E402
 from lovli.retrieval_shared import (  # noqa: E402
+    build_law_cross_reference_affinity,
     build_law_coherence_decision,
     matches_expected_source,
     normalize_sigmoid_scores,
@@ -127,11 +128,24 @@ def _is_profile_default_row(row: dict, profile_defaults: dict) -> bool:
     return True
 
 
-def _apply_law_coherence_filter_candidates(candidates: list[dict], settings) -> tuple[list[dict], int]:
+def _apply_law_coherence_filter_candidates(
+    candidates: list[dict],
+    settings,
+    law_ref_to_id: dict[str, str] | None = None,
+) -> tuple[list[dict], int]:
     """Apply runtime-equivalent law coherence filtering on scored candidate dicts."""
     if not settings.law_coherence_filter_enabled:
         return candidates, 0
-    decision = build_law_coherence_decision(candidates, settings)
+    affinity = build_law_cross_reference_affinity(
+        candidates,
+        law_ref_to_id=law_ref_to_id,
+        settings=settings,
+    )
+    decision = build_law_coherence_decision(
+        candidates,
+        settings,
+        law_affinity_by_id=affinity,
+    )
     drop_indices = set(decision.get("drop_indices", set()))
     if not drop_indices:
         return candidates, 0
@@ -182,6 +196,7 @@ def precompute_candidates(
                         "doc_type": _infer_doc_type(metadata),
                         "has_editorial_notes": bool(metadata.get("editorial_notes")),
                         "editorial_notes_count": len(metadata.get("editorial_notes") or []),
+                        "cross_references": metadata.get("cross_references") or [],
                         "score": score,
                     }
                 )
@@ -289,7 +304,9 @@ def evaluate_combo(
         # not appended as standalone documents.
         provision_kept = [c for c in kept if c.get("doc_type") != "editorial_note"]
         provision_kept, coherence_dropped = _apply_law_coherence_filter_candidates(
-            provision_kept, chain.settings
+            provision_kept,
+            chain.settings,
+            law_ref_to_id=getattr(chain, "_law_ref_to_id", {}) or {},
         )
         law_coherence_filtered_count += coherence_dropped
         scores = [c["score"] for c in provision_kept]
@@ -650,6 +667,7 @@ def main() -> None:
         "reranker_ambiguity_min_gap": settings.reranker_ambiguity_min_gap,
         "reranker_ambiguity_top_score_ceiling": settings.reranker_ambiguity_top_score_ceiling,
         "law_routing_fallback_unfiltered": settings.law_routing_fallback_unfiltered,
+        "law_coherence_dominant_concentration_threshold": settings.law_coherence_dominant_concentration_threshold,
     }
 
     retrieval_k_initial_values = [15, 20]
@@ -728,6 +746,9 @@ def main() -> None:
             "reranker_ambiguity_min_gap": min_gap,
             "reranker_ambiguity_top_score_ceiling": top_score_ceiling,
             "law_routing_fallback_unfiltered": routing_fallback_unfiltered,
+            "law_coherence_dominant_concentration_threshold": (
+                chain.settings.law_coherence_dominant_concentration_threshold
+            ),
             **metrics,
         }
         row["is_profile_default_row"] = _is_profile_default_row(row, profile_defaults)

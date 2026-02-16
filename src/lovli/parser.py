@@ -664,7 +664,7 @@ def parse_law_header(xml_path: Path) -> dict:
 
     Returns:
         Dictionary with law metadata: law_id, law_title, law_short_name,
-        legal_area, date_in_force, chapter_count, article_count
+        legal_area, date_in_force, chapter_count, article_count, chapter_titles
     """
     if not xml_path.exists():
         raise FileNotFoundError(f"File not found: {xml_path}")
@@ -699,6 +699,18 @@ def parse_law_header(xml_path: Path) -> dict:
     parsed_articles = list(parse_xml_file(xml_path))
     chapter_count = len({a.chapter_id for a in parsed_articles if a.chapter_id})
     article_count = len(parsed_articles)
+    chapter_titles: list[str] = []
+    seen_chapter_keys: set[tuple[str, str]] = set()
+    for article in parsed_articles:
+        chapter_id = (article.chapter_id or "").strip()
+        chapter_title = (article.chapter_title or "").strip()
+        if not chapter_id or not chapter_title:
+            continue
+        key = (chapter_id, chapter_title)
+        if key in seen_chapter_keys:
+            continue
+        seen_chapter_keys.add(key)
+        chapter_titles.append(chapter_title)
 
     return {
         "law_id": law_id,
@@ -709,4 +721,5 @@ def parse_law_header(xml_path: Path) -> dict:
         "date_in_force": date_in_force,
         "chapter_count": chapter_count,
         "article_count": article_count,
+        "chapter_titles": chapter_titles,
     }

@@ -243,6 +243,12 @@ class Settings(BaseSettings):
         le=10,
         description="Minimum number of sources to keep after coherence filtering.",
     )
+    law_coherence_dominant_concentration_threshold: float = Field(
+        default=0.60,
+        ge=0.0,
+        le=1.0,
+        description="When dominant law occupies at least this share of kept sources, singleton non-dominant laws with no cross-reference affinity are removed aggressively.",
+    )
 
     # Indexing Configuration
     embedding_batch_size: int = Field(
