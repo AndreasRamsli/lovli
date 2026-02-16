@@ -101,6 +101,50 @@ def _has_attached_editorial(provision_rows: list[dict]) -> bool:
     return False
 
 
+def _apply_law_coherence_filter_candidates(candidates: list[dict], settings) -> tuple[list[dict], int]:
+    """Apply runtime-equivalent law coherence filtering on scored candidate dicts."""
+    if not candidates or len(candidates) < 2:
+        return candidates, 0
+    if not settings.law_coherence_filter_enabled:
+        return candidates, 0
+
+    grouped: dict[str, list[tuple[int, dict]]] = {}
+    for idx, candidate in enumerate(candidates):
+        law_id = (candidate.get("law_id") or "").strip() or "__unknown__"
+        grouped.setdefault(law_id, []).append((idx, candidate))
+    if len(grouped) <= 1:
+        return candidates, 0
+
+    law_stats: list[tuple[str, int, float, float]] = []
+    for law_id, indexed_items in grouped.items():
+        law_scores = [float(item.get("score", 0.0)) for _idx, item in indexed_items]
+        avg_score = sum(law_scores) / len(law_scores) if law_scores else 0.0
+        max_score = max(law_scores) if law_scores else 0.0
+        law_stats.append((law_id, len(indexed_items), avg_score, max_score))
+    law_stats.sort(key=lambda item: (item[1], item[2], item[3]), reverse=True)
+
+    dominant_law_id, _dominant_count, dominant_avg_score, _dominant_max_score = law_stats[0]
+    _ = dominant_law_id  # Keep variable for readability symmetry with runtime method.
+
+    drop_indices: set[int] = set()
+    for law_id, law_count, law_avg_score, _law_max_score in law_stats[1:]:
+        if law_count >= settings.law_coherence_min_law_count:
+            continue
+        if (dominant_avg_score - law_avg_score) < settings.law_coherence_score_gap:
+            continue
+        drop_indices.update(idx for idx, _item in grouped.get(law_id, []))
+
+    if not drop_indices:
+        return candidates, 0
+
+    min_sources_floor = min(settings.reranker_min_sources, len(candidates))
+    if (len(candidates) - len(drop_indices)) < min_sources_floor:
+        return candidates, 0
+
+    filtered = [item for idx, item in enumerate(candidates) if idx not in drop_indices]
+    return filtered, len(drop_indices)
+
+
 def precompute_candidates(
     chain: LegalRAGChain,
     questions: list[dict],
@@ -196,6 +240,9 @@ def evaluate_combo(
     non_editorial_clean = 0
     core_non_editorial_expected_total = 0
     core_non_editorial_clean = 0
+    law_contamination_total = 0
+    law_contamination_cases = 0
+    law_coherence_filtered_count = 0
     top_scores: list[float] = []
     final_k = chain.settings.retrieval_k
     min_sources = chain.settings.reranker_min_sources
@@ -237,6 +284,10 @@ def evaluate_combo(
         # Attachment model: editorial candidates are attached to provision rows,
         # not appended as standalone documents.
         provision_kept = [c for c in kept if c.get("doc_type") != "editorial_note"]
+        provision_kept, coherence_dropped = _apply_law_coherence_filter_candidates(
+            provision_kept, chain.settings
+        )
+        law_coherence_filtered_count += coherence_dropped
         scores = [c["score"] for c in provision_kept]
         cited_ids = [c["article_id"] for c in provision_kept if c.get("article_id")]
         cited_sources = [
@@ -246,6 +297,11 @@ def evaluate_combo(
         ]
         cited_editorial = _has_attached_editorial(provision_kept)
         top_score = scores[0] if scores else None
+        if provision_kept:
+            law_contamination_total += 1
+            distinct_laws = {c.get("law_id", "") for c in provision_kept if c.get("law_id")}
+            if len(distinct_laws) > 1:
+                law_contamination_cases += 1
 
         if top_score is not None:
             top_scores.append(top_score)
@@ -456,6 +512,11 @@ def evaluate_combo(
         if unexpected_citation_rate_count
         else 0.0
     )
+    law_contamination_rate = (
+        law_contamination_cases / law_contamination_total
+        if law_contamination_total
+        else 0.0
+    )
 
     return {
         "recall_at_k": recall_at_k,
@@ -476,6 +537,8 @@ def evaluate_combo(
         "mean_expected_coverage": mean_expected_coverage,
         "citation_precision": citation_precision,
         "unexpected_citation_rate": unexpected_citation_rate,
+        "law_contamination_rate": law_contamination_rate,
+        "law_coherence_filtered_count": law_coherence_filtered_count,
         "editorial_context_success": editorial_context_success,
         "core_editorial_context_success": core_editorial_context_success,
         "non_editorial_clean_success": non_editorial_clean_success,
@@ -570,6 +633,7 @@ def main() -> None:
         logger.info(
             "k_init=%s k=%s conf=%.2f min_doc=%.2f min_gap=%.2f top_ceiling=%.2f -> "
             "recall=%.3f coverage=%.3f precision=%.3f unexpected=%.3f "
+            "law_contam=%.3f coherence_dropped=%s "
             "single=%.3f multi=%.3f neg=%.3f neg_legal=%.3f neg_nonlegal=%.3f "
             "editorial=%.3f non_editorial_clean=%.3f avg_top=%.3f",
             retrieval_k_initial,
@@ -582,6 +646,8 @@ def main() -> None:
             metrics["mean_expected_coverage"],
             metrics["citation_precision"],
             metrics["unexpected_citation_rate"],
+            metrics["law_contamination_rate"],
+            metrics["law_coherence_filtered_count"],
             metrics["single_article_recall_at_k"],
             metrics["multi_article_recall_at_k"],
             metrics["negative_success"],
@@ -599,6 +665,7 @@ def main() -> None:
             r["negative_offtopic_legal_success"],
             r["negative_ambiguity_success"],
             r["non_editorial_clean_success"],
+            -r["law_contamination_rate"],
             r["recall_at_k"],
             r["mean_expected_coverage"],
             r["citation_precision"],

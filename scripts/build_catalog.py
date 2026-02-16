@@ -20,6 +20,9 @@ Usage:
     # Retry failed/timed-out summaries from a previous run
     python scripts/build_catalog.py data/sf/ --backfill
 
+    # Build one merged catalog from laws + regulations
+    python scripts/build_catalog.py data/nl/ data/sf/ --output data/law_catalog.json
+
     # Custom output path
     python scripts/build_catalog.py data/nl/ --output data/my_catalog.json
 """
@@ -37,7 +40,12 @@ sys.path.insert(0, str(root_dir / "src"))
 from dotenv import load_dotenv
 load_dotenv(root_dir / ".env")
 
-from lovli.catalog import build_catalog, backfill_summaries, DEFAULT_CONCURRENCY
+from lovli.catalog import (
+    build_catalog,
+    build_catalog_multi,
+    backfill_summaries,
+    DEFAULT_CONCURRENCY,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -73,8 +81,9 @@ def main():
     )
     parser.add_argument(
         "data_dir",
+        nargs="+",
         type=Path,
-        help="Directory containing .xml law files (e.g. data/nl/)",
+        help="One or more directories containing .xml law files (e.g. data/nl/ data/sf/)",
     )
     parser.add_argument(
         "--output",
@@ -120,8 +129,9 @@ def main():
         )
     else:
         # Normal build mode
-        if not args.data_dir.is_dir():
-            logger.error(f"Not a directory: {args.data_dir}")
+        invalid_dirs = [path for path in args.data_dir if not path.is_dir()]
+        if invalid_dirs:
+            logger.error("Invalid directory inputs: %s", ", ".join(str(path) for path in invalid_dirs))
             sys.exit(1)
 
         llm = None
@@ -132,13 +142,22 @@ def main():
                 logger.warning(f"Could not initialize LLM, skipping summaries: {e}")
                 llm = None
 
-        catalog = build_catalog(
-            data_dir=args.data_dir,
-            output_path=args.output,
-            llm=llm,
-            skip_summaries=args.no_summaries or llm is None,
-            concurrency=args.concurrency,
-        )
+        if len(args.data_dir) == 1:
+            catalog = build_catalog(
+                data_dir=args.data_dir[0],
+                output_path=args.output,
+                llm=llm,
+                skip_summaries=args.no_summaries or llm is None,
+                concurrency=args.concurrency,
+            )
+        else:
+            catalog = build_catalog_multi(
+                data_dirs=args.data_dir,
+                output_path=args.output,
+                llm=llm,
+                skip_summaries=args.no_summaries or llm is None,
+                concurrency=args.concurrency,
+            )
 
     elapsed = time.time() - start_time
 

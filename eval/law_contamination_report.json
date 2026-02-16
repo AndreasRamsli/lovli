@@ -1,0 +1,298 @@
+{
+  "aggregate": {
+    "total_questions": 5,
+    "contamination_case_count": 3,
+    "contamination_rate": 0.6,
+    "singleton_foreign_case_count": 3,
+    "singleton_foreign_rate": 0.6,
+    "mean_foreign_score_gap": 0.04375440435201714,
+    "unexpected_citation_rate": 0.85,
+    "total_unexpected_sources": 17,
+    "total_cited_sources": 20
+  },
+  "per_question": [
+    {
+      "id": "q001",
+      "question": "Hvor mye kan utleier kreve i depositum?",
+      "expected_articles": [
+        "kapittel-3-paragraf-5"
+      ],
+      "expected_sources": [
+        {
+          "law_id": "nl-19990326-017",
+          "article_id": "kapittel-3-paragraf-5"
+        }
+      ],
+      "retrieved_sources_count": 5,
+      "distinct_law_count": 3,
+      "dominant_law_id": "nl-19990326-017",
+      "has_contamination": true,
+      "singleton_foreign_laws": 2,
+      "avg_foreign_score_gap": 0.07824045358678094,
+      "matched_expected_source_count": 1,
+      "unexpected_sources_count": 4,
+      "law_stats": [
+        {
+          "law_id": "nl-19990326-017",
+          "law_title": "Lov om husleieavtaler (husleieloven)",
+          "count": 3,
+          "avg_score": 0.597187820125661,
+          "max_score": 0.7129460105915776,
+          "articles": [
+            "kapittel-3-paragraf-5",
+            "kapittel-3-paragraf-6",
+            "kapittel-3-paragraf-1"
+          ]
+        },
+        {
+          "law_id": "sf-20090602-0628",
+          "law_title": "Forskrift om unntak fra husleieloven § 3-5",
+          "count": 1,
+          "avg_score": 0.5301709534429435,
+          "max_score": 0.5301709534429435,
+          "articles": [
+            "paragraf-1"
+          ]
+        },
+        {
+          "law_id": "sf-20041222-1799",
+          "law_title": "Tillatelse til akvakultur av andre arter enn laks, ørret og regnbueørret (andre arter-forskriften)",
+          "count": 1,
+          "avg_score": 0.5077237796348165,
+          "max_score": 0.5077237796348165,
+          "articles": [
+            "kapittel-2-paragraf-8"
+          ]
+        }
+      ],
+      "unexpected_sources": [
+        {
+          "law_id": "nl-19990326-017",
+          "article_id": "kapittel-3-paragraf-6"
+        },
+        {
+          "law_id": "sf-20090602-0628",
+          "article_id": "paragraf-1"
+        },
+        {
+          "law_id": "sf-20041222-1799",
+          "article_id": "kapittel-2-paragraf-8"
+        },
+        {
+          "law_id": "nl-19990326-017",
+          "article_id": "kapittel-3-paragraf-1"
+        }
+      ]
+    },
+    {
+      "id": "q002",
+      "question": "Kan utleier øke husleien hvert år?",
+      "expected_articles": [
+        "kapittel-4-paragraf-2"
+      ],
+      "expected_sources": [
+        {
+          "law_id": "nl-19990326-017",
+          "article_id": "kapittel-4-paragraf-2"
+        }
+      ],
+      "retrieved_sources_count": 5,
+      "distinct_law_count": 2,
+      "dominant_law_id": "nl-19990326-017",
+      "has_contamination": true,
+      "singleton_foreign_laws": 1,
+      "avg_foreign_score_gap": 0.022023683447958575,
+      "matched_expected_source_count": 0,
+      "unexpected_sources_count": 5,
+      "law_stats": [
+        {
+          "law_id": "nl-19990326-017",
+          "law_title": "Lov om husleieavtaler (husleieloven)",
+          "count": 4,
+          "avg_score": 0.5244989069878938,
+          "max_score": 0.5558105816763897,
+          "articles": [
+            "kapittel-3-paragraf-4",
+            "kapittel-9-paragraf-9",
+            "kapittel-3-paragraf-1",
+            "kapittel-4-paragraf-3"
+          ]
+        },
+        {
+          "law_id": "sf-20220531-0948",
+          "law_title": "Forskrift om stønad til beboere i asylmottak",
+          "count": 1,
+          "avg_score": 0.5024752235399352,
+          "max_score": 0.5024752235399352,
+          "articles": [
+            "paragraf-10"
+          ]
+        }
+      ],
+      "unexpected_sources": [
+        {
+          "law_id": "nl-19990326-017",
+          "article_id": "kapittel-3-paragraf-4"
+        },
+        {
+          "law_id": "nl-19990326-017",
+          "article_id": "kapittel-9-paragraf-9"
+        },
+        {
+          "law_id": "nl-19990326-017",
+          "article_id": "kapittel-3-paragraf-1"
+        },
+        {
+          "law_id": "nl-19990326-017",
+          "article_id": "kapittel-4-paragraf-3"
+        },
+        {
+          "law_id": "sf-20220531-0948",
+          "article_id": "paragraf-10"
+        }
+      ]
+    },
+    {
+      "id": "q003",
+      "question": "Hva er oppsigelsestiden for en vanlig leilighet?",
+      "expected_articles": [
+        "kapittel-9-paragraf-6"
+      ],
+      "expected_sources": [
+        {
+          "law_id": "nl-19990326-017",
+          "article_id": "kapittel-9-paragraf-6"
+        }
+      ],
+      "retrieved_sources_count": 5,
+      "distinct_law_count": 2,
+      "dominant_law_id": "nl-19990326-017",
+      "has_contamination": true,
+      "singleton_foreign_laws": 1,
+      "avg_foreign_score_gap": 0.03099907602131191,
+      "matched_expected_source_count": 1,
+      "unexpected_sources_count": 4,
+      "law_stats": [
+        {
+          "law_id": "nl-19990326-017",
+          "law_title": "Lov om husleieavtaler (husleieloven)",
+          "count": 4,
+          "avg_score": 0.5661574415495501,
+          "max_score": 0.6673022523760519,
+          "articles": [
+            "kapittel-9-paragraf-6",
+            "kapittel-9-paragraf-7",
+            "kapittel-9-paragraf-8",
+            "kapittel-9-paragraf-2"
+          ]
+        },
+        {
+          "law_id": "nl-20201218-146",
+          "law_title": "Lov om finansavtaler (finansavtaleloven)",
+          "count": 1,
+          "avg_score": 0.5351583655282381,
+          "max_score": 0.5351583655282381,
+          "articles": [
+            "kapittel-5-kapittel-5-paragraf-2-nummer-2"
+          ]
+        }
+      ],
+      "unexpected_sources": [
+        {
+          "law_id": "nl-20201218-146",
+          "article_id": "kapittel-5-kapittel-5-paragraf-2-nummer-2"
+        },
+        {
+          "law_id": "nl-19990326-017",
+          "article_id": "kapittel-9-paragraf-7"
+        },
+        {
+          "law_id": "nl-19990326-017",
+          "article_id": "kapittel-9-paragraf-8"
+        },
+        {
+          "law_id": "nl-19990326-017",
+          "article_id": "kapittel-9-paragraf-2"
+        }
+      ]
+    },
+    {
+      "id": "q004",
+      "question": "Hvem har ansvaret for vedlikehold av dørlåser og kraner?",
+      "expected_articles": [
+        "kapittel-5-paragraf-3"
+      ],
+      "expected_sources": [
+        {
+          "law_id": "nl-19990326-017",
+          "article_id": "kapittel-5-paragraf-3"
+        }
+      ],
+      "retrieved_sources_count": 0,
+      "distinct_law_count": 0,
+      "dominant_law_id": null,
+      "has_contamination": false,
+      "singleton_foreign_laws": 0,
+      "avg_foreign_score_gap": null,
+      "matched_expected_source_count": 0,
+      "unexpected_sources_count": 0,
+      "law_stats": [],
+      "unexpected_sources": []
+    },
+    {
+      "id": "q005",
+      "question": "Når kan utleier heve leiekontrakten?",
+      "expected_articles": [
+        "kapittel-9-paragraf-9"
+      ],
+      "expected_sources": [
+        {
+          "law_id": "nl-19990326-017",
+          "article_id": "kapittel-9-paragraf-9"
+        }
+      ],
+      "retrieved_sources_count": 5,
+      "distinct_law_count": 1,
+      "dominant_law_id": "nl-19990326-017",
+      "has_contamination": false,
+      "singleton_foreign_laws": 0,
+      "avg_foreign_score_gap": null,
+      "matched_expected_source_count": 1,
+      "unexpected_sources_count": 4,
+      "law_stats": [
+        {
+          "law_id": "nl-19990326-017",
+          "law_title": "Lov om husleieavtaler (husleieloven)",
+          "count": 5,
+          "avg_score": 0.6737989364425859,
+          "max_score": 0.7308403269161643,
+          "articles": [
+            "kapittel-9-paragraf-9",
+            "kapittel-2-paragraf-12",
+            "kapittel-9-paragraf-2",
+            "kapittel-9-paragraf-5",
+            "kapittel-9-paragraf-10"
+          ]
+        }
+      ],
+      "unexpected_sources": [
+        {
+          "law_id": "nl-19990326-017",
+          "article_id": "kapittel-2-paragraf-12"
+        },
+        {
+          "law_id": "nl-19990326-017",
+          "article_id": "kapittel-9-paragraf-2"
+        },
+        {
+          "law_id": "nl-19990326-017",
+          "article_id": "kapittel-9-paragraf-5"
+        },
+        {
+          "law_id": "nl-19990326-017",
+          "article_id": "kapittel-9-paragraf-10"
+        }
+      ]
+    }
+  ]
+}

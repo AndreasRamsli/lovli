@@ -161,6 +161,22 @@ class Settings(BaseSettings):
         le=10,
         description="Minimum token overlap required for a law to be considered a routing candidate.",
     )
+    law_coherence_filter_enabled: bool = Field(
+        default=True,
+        description="Filter low-confidence singleton sources from non-dominant laws after reranking.",
+    )
+    law_coherence_min_law_count: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        description="Minimum number of kept sources required for a non-dominant law to remain in context.",
+    )
+    law_coherence_score_gap: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=1.0,
+        description="Minimum average score gap (dominant law - foreign law) required before removing foreign-law singleton sources.",
+    )
 
     # Indexing Configuration
     embedding_batch_size: int = Field(

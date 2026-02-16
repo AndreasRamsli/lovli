@@ -196,6 +196,42 @@ def build_catalog(
     return catalog
 
 
+def build_catalog_multi(
+    data_dirs: list[Path],
+    output_path: Path,
+    llm=None,
+    skip_summaries: bool = False,
+    concurrency: int = DEFAULT_CONCURRENCY,
+) -> list[dict]:
+    """
+    Build a merged catalog from multiple law directories.
+
+    Entries are deduplicated by `law_id` with first-seen precedence to keep
+    output deterministic.
+    """
+    if not data_dirs:
+        raise ValueError("At least one data directory is required.")
+
+    catalog: list[dict] = []
+    seen_law_ids: set[str] = set()
+    for data_dir in data_dirs:
+        logger.info("Scanning catalog input directory: %s", data_dir)
+        for header in scan_law_headers(data_dir):
+            law_id = (header.get("law_id") or "").strip()
+            if not law_id or law_id in seen_law_ids:
+                continue
+            seen_law_ids.add(law_id)
+            catalog.append({**header, "summary": ""})
+
+    logger.info("Scanned %s unique law headers from %s directories", len(catalog), len(data_dirs))
+
+    if llm and not skip_summaries:
+        asyncio.run(_generate_summaries_batch(catalog, llm, concurrency))
+
+    _write_catalog(catalog, output_path)
+    return catalog
+
+
 def backfill_summaries(
     catalog_path: Path,
     llm,

@@ -810,6 +810,73 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             )
         return filtered_docs, filtered_scores
 
+    def _filter_by_law_coherence(
+        self, docs: list, scores: list[float]
+    ) -> tuple[list, list[float]]:
+        """
+        Filter low-confidence sources from non-dominant laws.
+
+        Keeps the dominant law and removes non-dominant laws that have too few
+        sources when they are clearly lower-scoring than the dominant law.
+        """
+        if not docs or not scores or len(docs) != len(scores):
+            return docs, scores
+        if len(docs) < 2:
+            return docs, scores
+
+        grouped_indices: dict[str, list[int]] = {}
+        for idx, doc in enumerate(docs):
+            metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+            law_id = (metadata.get("law_id") or "").strip() or "__unknown__"
+            grouped_indices.setdefault(law_id, []).append(idx)
+
+        if len(grouped_indices) <= 1:
+            return docs, scores
+
+        law_stats: list[tuple[str, int, float, float]] = []
+        for law_id, indices in grouped_indices.items():
+            law_scores = [scores[idx] for idx in indices]
+            avg_score = sum(law_scores) / len(law_scores)
+            max_score = max(law_scores)
+            law_stats.append((law_id, len(indices), avg_score, max_score))
+        law_stats.sort(key=lambda item: (item[1], item[2], item[3]), reverse=True)
+
+        dominant_law_id, _dominant_count, dominant_avg_score, _dominant_max_score = law_stats[0]
+        min_law_count = self.settings.law_coherence_min_law_count
+        min_gap = self.settings.law_coherence_score_gap
+
+        drop_indices: set[int] = set()
+        for law_id, law_count, law_avg_score, _law_max_score in law_stats[1:]:
+            # Keep non-dominant laws that have enough support in top results.
+            if law_count >= min_law_count:
+                continue
+            score_gap = dominant_avg_score - law_avg_score
+            if score_gap < min_gap:
+                continue
+            drop_indices.update(grouped_indices.get(law_id, []))
+
+        if not drop_indices:
+            return docs, scores
+
+        min_sources_floor = min(self.settings.reranker_min_sources, len(docs))
+        if (len(docs) - len(drop_indices)) < min_sources_floor:
+            logger.debug(
+                "Skipping law coherence filter to preserve minimum sources floor "
+                "(would keep %s < min_sources_floor=%s)",
+                len(docs) - len(drop_indices),
+                min_sources_floor,
+            )
+            return docs, scores
+
+        filtered_docs = [doc for idx, doc in enumerate(docs) if idx not in drop_indices]
+        filtered_scores = [score for idx, score in enumerate(scores) if idx not in drop_indices]
+        logger.debug(
+            "Law coherence filter removed %s docs from non-dominant laws (dominant_law=%s)",
+            len(drop_indices),
+            dominant_law_id,
+        )
+        return filtered_docs, filtered_scores
+
     def retrieve(
         self, question: str, chat_history: list[Dict[str, str]] | None = None
     ) -> Tuple[list[Dict[str, Any]], float | None, list[float]]:
@@ -863,6 +930,8 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
         if self.reranker and docs:
             docs, scores = self._rerank(retrieval_query, docs, top_k=self.settings.retrieval_k)
             docs, scores = self._apply_reranker_doc_filter(docs, scores)
+            if self.settings.law_coherence_filter_enabled:
+                docs, scores = self._filter_by_law_coherence(docs, scores)
             docs, scores = self._attach_editorial_to_provisions(docs, scores=scores)
             docs, scores = self._prioritize_doc_types(docs, scores, retrieval_query=retrieval_query)
             top_score = scores[0] if scores else None
