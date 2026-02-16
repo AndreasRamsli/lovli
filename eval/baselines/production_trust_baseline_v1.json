@@ -43,5 +43,89 @@
       "operator": "<=",
       "value": 0.50
     }
+  ],
+  "gates_v2": [
+    {
+      "metric": "contamination.aggregate.route_miss_expected_law_rate",
+      "operator": "<=",
+      "value": 0.05
+    },
+    {
+      "metric": "contamination.aggregate.dominant_law_mismatch_rate",
+      "operator": "<=",
+      "value": 0.20
+    },
+    {
+      "metric": "contamination.aggregate.unexpected_citation_rate",
+      "operator": "<=",
+      "value": 0.70
+    },
+    {
+      "metric": "contamination.aggregate.fallback_recovery_rate",
+      "operator": ">=",
+      "value": 0.20
+    },
+    {
+      "metric": "contamination.aggregate.fallback_triggered_count",
+      "operator": "<=",
+      "value": 40
+    },
+    {
+      "metric": "sweep.top.recall_at_k",
+      "operator": ">=",
+      "value": 0.78
+    },
+    {
+      "metric": "sweep.top.citation_precision",
+      "operator": ">=",
+      "value": 0.35
+    },
+    {
+      "metric": "sweep.top.false_positive_gating_rate",
+      "operator": "<=",
+      "value": 0.20
+    }
+  ],
+  "gates_v3": [
+    {
+      "metric": "contamination.aggregate.route_miss_expected_law_rate",
+      "operator": "<=",
+      "value": 0.05
+    },
+    {
+      "metric": "contamination.aggregate.dominant_law_mismatch_rate",
+      "operator": "<=",
+      "value": 0.15
+    },
+    {
+      "metric": "contamination.aggregate.unexpected_citation_rate",
+      "operator": "<=",
+      "value": 0.60
+    },
+    {
+      "metric": "contamination.aggregate.fallback_recovery_rate",
+      "operator": ">=",
+      "value": 0.25
+    },
+    {
+      "metric": "contamination.aggregate.fallback_triggered_count",
+      "operator": "<=",
+      "value": 35
+    },
+    {
+      "metric": "sweep.top.recall_at_k",
+      "operator": ">=",
+      "value": 0.80
+    },
+    {
+      "metric": "sweep.top.citation_precision",
+      "operator": ">=",
+      "value": 0.45
+    },
+    {
+      "metric": "sweep.top.false_positive_gating_rate",
+      "operator": "<=",
+      "value": 0.18
+    }
   ]
 }

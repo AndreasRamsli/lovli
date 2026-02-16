@@ -203,6 +203,24 @@ class Settings(BaseSettings):
         le=50,
         description="Maximum number of routed laws to keep when uncertainty fallback uses broadened routing instead of unfiltered retrieval.",
     )
+    law_routing_fallback_min_lexical_support: int = Field(
+        default=1,
+        ge=0,
+        le=10,
+        description="Minimum lexical score support required when building stage-1 broadened fallback law set.",
+    )
+    law_routing_stage1_min_docs: int = Field(
+        default=2,
+        ge=1,
+        le=20,
+        description="Minimum retrieved documents required before accepting stage-1 broadened fallback results.",
+    )
+    law_routing_stage1_min_top_score: float = Field(
+        default=0.32,
+        ge=0.0,
+        le=1.0,
+        description="Minimum top reranker score required before accepting stage-1 broadened fallback results.",
+    )
     law_routing_min_token_overlap: int = Field(
         default=1,
         ge=1,
@@ -248,6 +266,56 @@ class Settings(BaseSettings):
         ge=0.0,
         le=1.0,
         description="When dominant law occupies at least this share of kept sources, singleton non-dominant laws with no cross-reference affinity are removed aggressively.",
+    )
+    law_rank_fusion_enabled: bool = Field(
+        default=True,
+        description="Enable deterministic law-aware rank fusion after reranker + coherence filtering.",
+    )
+    law_rank_fusion_weight_doc_score: float = Field(
+        default=0.55,
+        ge=0.0,
+        le=1.0,
+        description="Rank-fusion weight for document-level cross-encoder score.",
+    )
+    law_rank_fusion_weight_routing: float = Field(
+        default=0.20,
+        ge=0.0,
+        le=1.0,
+        description="Rank-fusion weight for law-level routing alignment.",
+    )
+    law_rank_fusion_weight_affinity: float = Field(
+        default=0.10,
+        ge=0.0,
+        le=1.0,
+        description="Rank-fusion weight for law cross-reference affinity signal.",
+    )
+    law_rank_fusion_weight_dominance: float = Field(
+        default=0.10,
+        ge=0.0,
+        le=1.0,
+        description="Rank-fusion weight for dominant-law coherence context.",
+    )
+    law_rank_fusion_weight_concentration: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+        description="Rank-fusion weight for law concentration among top candidates.",
+    )
+    law_uncertainty_law_cap_enabled: bool = Field(
+        default=True,
+        description="Enable temporary law-cap when uncertain fallback yields near-tied multi-law candidates.",
+    )
+    law_uncertainty_law_cap_max_laws: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        description="Maximum number of laws to keep when uncertainty law-cap is triggered.",
+    )
+    law_uncertainty_law_cap_max_gap: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+        description="Maximum top-2 law strength gap for uncertainty law-cap activation.",
     )
 
     # Indexing Configuration

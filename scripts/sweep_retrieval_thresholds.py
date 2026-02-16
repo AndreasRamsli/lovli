@@ -26,6 +26,8 @@ from lovli.chain import LegalRAGChain, _infer_doc_type  # noqa: E402
 from lovli.config import get_settings  # noqa: E402
 from lovli.eval_utils import infer_negative_type, validate_questions  # noqa: E402
 from lovli.retrieval_shared import (  # noqa: E402
+    apply_uncertainty_law_cap,
+    build_law_aware_rank_fusion,
     build_law_cross_reference_affinity,
     build_law_coherence_decision,
     matches_expected_source,
@@ -132,10 +134,10 @@ def _apply_law_coherence_filter_candidates(
     candidates: list[dict],
     settings,
     law_ref_to_id: dict[str, str] | None = None,
-) -> tuple[list[dict], int]:
+) -> tuple[list[dict], int, dict]:
     """Apply runtime-equivalent law coherence filtering on scored candidate dicts."""
     if not settings.law_coherence_filter_enabled:
-        return candidates, 0
+        return candidates, 0, {"reason": "disabled"}
     affinity = build_law_cross_reference_affinity(
         candidates,
         law_ref_to_id=law_ref_to_id,
@@ -148,9 +150,26 @@ def _apply_law_coherence_filter_candidates(
     )
     drop_indices = set(decision.get("drop_indices", set()))
     if not drop_indices:
-        return candidates, 0
+        return candidates, 0, decision
     filtered = [item for idx, item in enumerate(candidates) if idx not in drop_indices]
-    return filtered, len(drop_indices)
+    return filtered, len(drop_indices), decision
+
+
+def _build_routing_alignment_map(routing_diagnostics: dict | None) -> dict[str, float]:
+    """Build law routing-alignment map in [0, 1] from routing diagnostics."""
+    diagnostics = routing_diagnostics or {}
+    scored_candidates = diagnostics.get("scored_candidates") or []
+    alignment: dict[str, float] = {}
+    for candidate in scored_candidates:
+        law_id = (candidate.get("law_id") or "").strip()
+        if not law_id:
+            continue
+        score = candidate.get("law_reranker_score")
+        lexical = float(candidate.get("lexical_score", 0.0))
+        if score is None:
+            score = min(1.0, lexical / 10.0)
+        alignment[law_id] = max(0.0, min(1.0, float(score)))
+    return alignment
 
 
 def precompute_candidates(
@@ -163,7 +182,10 @@ def precompute_candidates(
     cached: list[dict] = []
     for row in questions:
         query = row["question"]
-        docs = chain._invoke_retriever(query, routed_law_ids=chain._route_law_ids(query))
+        routed_law_ids = chain._route_law_ids(query)
+        route_diag_before = dict(getattr(chain, "_last_routing_diagnostics", {}) or {})
+        docs = chain._invoke_retriever(query, routed_law_ids=routed_law_ids)
+        route_diag_after = dict(getattr(chain, "_last_routing_diagnostics", route_diag_before) or route_diag_before)
 
         # Deduplicate like retrieve()
         dedup_docs = []
@@ -211,6 +233,10 @@ def precompute_candidates(
                 "case_type": classify_case_type(row),
                 "negative_type": infer_negative_type(row),
                 "is_core": row.get("id") in CORE_QUESTION_IDS,
+                "routing_is_uncertain": bool(
+                    ((route_diag_after.get("routing_confidence") or {}).get("is_uncertain"))
+                ),
+                "routing_alignment_by_law": _build_routing_alignment_map(route_diag_after),
                 "candidates": candidates,
             }
         )
@@ -227,6 +253,11 @@ def evaluate_combo(
     top_score_ceiling: float,
 ) -> dict:
     """Compute retrieval metrics for one config combo using cached candidates."""
+    calibration_bin_count = 5
+    calibration_bins = [
+        {"low": i / calibration_bin_count, "high": (i + 1) / calibration_bin_count, "total": 0, "hits": 0}
+        for i in range(calibration_bin_count)
+    ]
     retrieval_hits = 0
     retrieval_total = 0
     expected_coverage_total = 0.0
@@ -303,13 +334,48 @@ def evaluate_combo(
         # Attachment model: editorial candidates are attached to provision rows,
         # not appended as standalone documents.
         provision_kept = [c for c in kept if c.get("doc_type") != "editorial_note"]
-        provision_kept, coherence_dropped = _apply_law_coherence_filter_candidates(
+        provision_kept, coherence_dropped, coherence_decision = _apply_law_coherence_filter_candidates(
             provision_kept,
             chain.settings,
             law_ref_to_id=getattr(chain, "_law_ref_to_id", {}) or {},
         )
         law_coherence_filtered_count += coherence_dropped
-        scores = [c["score"] for c in provision_kept]
+        if provision_kept:
+            fusion_candidates = [
+                {
+                    "index": idx,
+                    "law_id": (candidate.get("law_id") or "").strip(),
+                    "score": float(candidate.get("score", 0.0)),
+                    "cross_references": candidate.get("cross_references") or [],
+                }
+                for idx, candidate in enumerate(provision_kept)
+            ]
+            law_affinity = build_law_cross_reference_affinity(
+                fusion_candidates,
+                law_ref_to_id=getattr(chain, "_law_ref_to_id", {}) or {},
+                settings=chain.settings,
+            )
+            fused = build_law_aware_rank_fusion(
+                fusion_candidates,
+                chain.settings,
+                law_affinity_by_id=law_affinity,
+                routing_alignment_by_id=row.get("routing_alignment_by_law") or {},
+                dominant_context=coherence_decision,
+            )
+            ranked_rows = fused.get("ranked") or []
+            ranked_rows, _cap_diag = apply_uncertainty_law_cap(
+                ranked_rows,
+                fused.get("law_strengths") or {},
+                settings=chain.settings,
+                is_uncertain=bool(row.get("routing_is_uncertain")),
+            )
+            top_k = min(final_k, len(ranked_rows))
+            ranked_rows = ranked_rows[:top_k]
+            provision_kept = [provision_kept[int(item["index"])] for item in ranked_rows]
+            # Keep CE score stream for gate semantics.
+            scores = [float(item.get("score", 0.0)) for item in ranked_rows]
+        else:
+            scores = []
         cited_ids = [c["article_id"] for c in provision_kept if c.get("article_id")]
         cited_sources = [
             {"law_id": c.get("law_id", ""), "article_id": c.get("article_id", "")}
@@ -412,6 +478,11 @@ def evaluate_combo(
                     core_segment[case_type]["total"] += 1
                     if matched:
                         core_segment[case_type]["hits"] += 1
+            if top_score is not None:
+                bin_idx = min(int(top_score * calibration_bin_count), calibration_bin_count - 1)
+                calibration_bins[bin_idx]["total"] += 1
+                if matched:
+                    calibration_bins[bin_idx]["hits"] += 1
         else:
             # Ambiguous / off-topic guardrail: ideally no sources, or gated.
             ambiguity_total += 1
@@ -576,6 +647,24 @@ def evaluate_combo(
     ambiguity_threshold_crossing_rate = (
         ambiguity_threshold_crossings / scored_query_count if scored_query_count else 0.0
     )
+    calibration_diagnostics: list[dict] = []
+    expected_calibration_error = 0.0
+    calibration_total = sum(int(bin_item["total"]) for bin_item in calibration_bins)
+    for bin_item in calibration_bins:
+        total = int(bin_item["total"])
+        hits = int(bin_item["hits"])
+        observed_precision = (hits / total) if total else 0.0
+        predicted_confidence = (float(bin_item["low"]) + float(bin_item["high"])) / 2.0
+        bucket_weight = (total / calibration_total) if calibration_total else 0.0
+        expected_calibration_error += bucket_weight * abs(observed_precision - predicted_confidence)
+        calibration_diagnostics.append(
+            {
+                "score_range": [round(float(bin_item["low"]), 2), round(float(bin_item["high"]), 2)],
+                "total": total,
+                "observed_precision": observed_precision,
+                "predicted_confidence_midpoint": predicted_confidence,
+            }
+        )
 
     metrics = {
         "recall_at_k": recall_at_k,
@@ -611,6 +700,8 @@ def evaluate_combo(
         "core_editorial_context_success": core_editorial_context_success,
         "non_editorial_clean_success": non_editorial_clean_success,
         "core_non_editorial_clean_success": core_non_editorial_clean_success,
+        "calibration_bins": calibration_diagnostics,
+        "expected_calibration_error": expected_calibration_error,
     }
     metrics["balanced_score"] = _compute_balanced_score(metrics)
     return metrics
@@ -668,6 +759,9 @@ def main() -> None:
         "reranker_ambiguity_top_score_ceiling": settings.reranker_ambiguity_top_score_ceiling,
         "law_routing_fallback_unfiltered": settings.law_routing_fallback_unfiltered,
         "law_coherence_dominant_concentration_threshold": settings.law_coherence_dominant_concentration_threshold,
+        "law_routing_stage1_min_docs": settings.law_routing_stage1_min_docs,
+        "law_routing_stage1_min_top_score": settings.law_routing_stage1_min_top_score,
+        "law_rank_fusion_enabled": settings.law_rank_fusion_enabled,
     }
 
     retrieval_k_initial_values = [15, 20]
@@ -749,6 +843,9 @@ def main() -> None:
             "law_coherence_dominant_concentration_threshold": (
                 chain.settings.law_coherence_dominant_concentration_threshold
             ),
+            "law_routing_stage1_min_docs": chain.settings.law_routing_stage1_min_docs,
+            "law_routing_stage1_min_top_score": chain.settings.law_routing_stage1_min_top_score,
+            "law_rank_fusion_enabled": chain.settings.law_rank_fusion_enabled,
             **metrics,
         }
         row["is_profile_default_row"] = _is_profile_default_row(row, profile_defaults)

@@ -101,6 +101,13 @@ def main() -> None:
         default=None,
         help="Optional trust profile name to select from sweep rows (e.g. balanced_v1, strict_v1).",
     )
+    parser.add_argument(
+        "--gate-tier",
+        type=str,
+        default="v1",
+        choices=["v1", "v2", "v3"],
+        help="Gate strictness tier to evaluate (v1 current baseline, v2 stricter, v3 target).",
+    )
     args = parser.parse_args()
 
     contamination = _read_json(args.contamination_report)
@@ -127,9 +134,17 @@ def main() -> None:
         float(selected_row.get("balanced_score", 0.0)),
     )
 
+    if args.gate_tier == "v1":
+        gates = baseline.get("gates", [])
+    elif args.gate_tier == "v2":
+        gates = baseline.get("gates_v2", baseline.get("gates", []))
+    else:
+        gates = baseline.get("gates_v3", baseline.get("gates_v2", baseline.get("gates", [])))
+
     failures: list[str] = []
     passes = 0
-    for gate in baseline.get("gates", []):
+    logger.info("Evaluating gate tier: %s (%s checks)", args.gate_tier, len(gates))
+    for gate in gates:
         metric_path = gate.get("metric")
         operator = gate.get("operator")
         expected = gate.get("value")
@@ -157,7 +172,7 @@ def main() -> None:
                 f"{metric_path}: actual={actual:.6f} expected {operator} {float(expected):.6f}"
             )
 
-    logger.info("Gate checks passed: %s/%s", passes, len(baseline.get("gates", [])))
+    logger.info("Gate checks passed: %s/%s", passes, len(gates))
     if failures:
         logger.error("Regression gates failed:")
         for item in failures:

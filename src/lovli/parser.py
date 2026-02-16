@@ -25,6 +25,7 @@ _CANONICAL_LAW_REF_RE = re.compile(
     r"(lov|forskrift)/(\d{4}-\d{2}-\d{2})-(\d+)",
     flags=re.IGNORECASE,
 )
+_CHAPTER_PREFIX_RE = re.compile(r"^kapittel\s+\d+[a-zA-Z]?\.\s*", flags=re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -700,17 +701,46 @@ def parse_law_header(xml_path: Path) -> dict:
     chapter_count = len({a.chapter_id for a in parsed_articles if a.chapter_id})
     article_count = len(parsed_articles)
     chapter_titles: list[str] = []
-    seen_chapter_keys: set[tuple[str, str]] = set()
+    chapter_titles_normalized: list[str] = []
+    chapter_keywords: list[str] = []
+    seen_chapter_ids: set[str] = set()
+    seen_normalized_titles: set[str] = set()
+    seen_keywords: set[str] = set()
+
+    def _normalize_chapter_title(raw: str) -> str:
+        cleaned = _CHAPTER_PREFIX_RE.sub("", (raw or "").strip())
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
+
+    def _extract_chapter_keywords(text: str) -> list[str]:
+        tokens = re.findall(r"[a-z0-9]{4,}", (text or "").lower())
+        deduped: list[str] = []
+        seen_token: set[str] = set()
+        for token in tokens:
+            if token in seen_token:
+                continue
+            seen_token.add(token)
+            deduped.append(token)
+        return deduped[:8]
+
     for article in parsed_articles:
         chapter_id = (article.chapter_id or "").strip()
         chapter_title = (article.chapter_title or "").strip()
         if not chapter_id or not chapter_title:
             continue
-        key = (chapter_id, chapter_title)
-        if key in seen_chapter_keys:
+        normalized_title = _normalize_chapter_title(chapter_title)
+        if chapter_id in seen_chapter_ids:
             continue
-        seen_chapter_keys.add(key)
+        seen_chapter_ids.add(chapter_id)
         chapter_titles.append(chapter_title)
+        if normalized_title and normalized_title not in seen_normalized_titles:
+            seen_normalized_titles.add(normalized_title)
+            chapter_titles_normalized.append(normalized_title)
+            for keyword in _extract_chapter_keywords(normalized_title):
+                if keyword in seen_keywords:
+                    continue
+                seen_keywords.add(keyword)
+                chapter_keywords.append(keyword)
 
     return {
         "law_id": law_id,
@@ -722,4 +752,6 @@ def parse_law_header(xml_path: Path) -> dict:
         "chapter_count": chapter_count,
         "article_count": article_count,
         "chapter_titles": chapter_titles,
+        "chapter_titles_normalized": chapter_titles_normalized,
+        "chapter_keywords": chapter_keywords,
     }

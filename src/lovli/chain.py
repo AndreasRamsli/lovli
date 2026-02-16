@@ -21,6 +21,8 @@ from .editorial import (
     dedupe_by_law_article,
 )
 from .retrieval_shared import (
+    apply_uncertainty_law_cap,
+    build_law_aware_rank_fusion,
     build_law_cross_reference_affinity,
     build_law_coherence_decision,
     normalize_law_ref,
@@ -55,6 +57,13 @@ _ROUTING_STOPWORDS = {
     "ikke",
     "etter",
 }
+
+
+def _normalize_keyword_term(value: str) -> str:
+    """Normalize chapter keywords to compact lexical routing terms."""
+    normalized = re.sub(r"[^a-z0-9]+", " ", (value or "").lower()).strip()
+    return re.sub(r"\s+", " ", normalized)
+
 
 # Confidence gating response (used by both streaming and non-streaming paths)
 GATED_RESPONSE = (
@@ -271,6 +280,7 @@ Kontekst fra lovtekster:
         self._law_ref_to_id: dict[str, str] = {}
         self._last_routing_diagnostics: dict[str, Any] = {}
         self._last_coherence_diagnostics: dict[str, Any] = {}
+        self._last_rank_fusion_diagnostics: dict[str, Any] = {}
         if self.settings.law_routing_enabled:
             try:
                 self._law_catalog = load_catalog(Path(self.settings.law_catalog_path))
@@ -307,14 +317,30 @@ Kontekst fra lovtekster:
             chapter_titles = item.get("chapter_titles") or []
             if not isinstance(chapter_titles, list):
                 chapter_titles = [str(chapter_titles)]
+            chapter_keywords = item.get("chapter_keywords") or []
+            if not isinstance(chapter_keywords, list):
+                chapter_keywords = [str(chapter_keywords)]
             chapter_titles_text = " ".join(
                 chapter_title.strip()
                 for chapter_title in chapter_titles[:5]
                 if isinstance(chapter_title, str) and chapter_title.strip()
             )
+            chapter_keywords_text = " ".join(
+                _normalize_keyword_term(keyword)
+                for keyword in chapter_keywords[:20]
+                if isinstance(keyword, str) and _normalize_keyword_term(keyword)
+            )
             routing_text = " ".join(
                 part
-                for part in [title, short_name, summary, law_ref, legal_area, chapter_titles_text]
+                for part in [
+                    title,
+                    short_name,
+                    summary,
+                    law_ref,
+                    legal_area,
+                    chapter_titles_text,
+                    chapter_keywords_text,
+                ]
                 if part
             )
             entries.append(
@@ -324,6 +350,7 @@ Kontekst fra lovtekster:
                     "law_short_name": short_name,
                     "routing_text": routing_text,
                     "routing_tokens": _tokenize_for_routing(routing_text),
+                    "chapter_keywords": chapter_keywords,
                     "short_name_normalized": _normalize_law_mention(short_name),
                     "law_title_normalized": _normalize_law_mention(title),
                 }
@@ -895,6 +922,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
         rerank_top_k = self.settings.law_routing_rerank_top_k
         lexical_top_k = self.settings.law_routing_max_candidates
         fallback_max_laws = self.settings.law_routing_fallback_max_laws
+        fallback_min_lexical = self.settings.law_routing_fallback_min_lexical_support
 
         top_score = None
         second_score = None
@@ -929,6 +957,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
                 and gap < self.settings.law_routing_uncertainty_min_gap
             )
 
+        fallback_mode = None
         if self.reranker:
             selected = [
                 candidate
@@ -939,19 +968,21 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             if not selected:
                 selected = scored_candidates[: max(lexical_top_k, rerank_top_k)]
             if _is_uncertain(scored_candidates):
-                if self.settings.law_routing_fallback_unfiltered:
-                    routed = []
-                    fallback_mode = "uncertainty_unfiltered"
-                else:
-                    broadened = scored_candidates[:fallback_max_laws]
-                    routed = [candidate["law_id"] for candidate in broadened]
-                    fallback_mode = "uncertainty_broadened"
+                broadened = [
+                    candidate
+                    for candidate in scored_candidates
+                    if int(candidate.get("lexical_score", 0)) >= fallback_min_lexical
+                ]
+                if not broadened:
+                    broadened = list(scored_candidates)
+                routed = [candidate["law_id"] for candidate in broadened[:fallback_max_laws]]
+                fallback_mode = "uncertainty_staged"
             else:
                 routed = [candidate["law_id"] for candidate in selected[:rerank_top_k]]
-                fallback_mode = None
         else:
             routed = [candidate["law_id"] for candidate in scored_candidates[:lexical_top_k]]
-            fallback_mode = None
+        routed = [law_id for law_id in routed if (law_id or "").strip()]
+        routed = list(dict.fromkeys(routed))
 
         uncertainty_triggered = bool(fallback_mode and fallback_mode.startswith("uncertainty"))
         routing_confidence = {
@@ -964,10 +995,8 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             "uncertainty_min_gap": self.settings.law_routing_uncertainty_min_gap,
             "is_uncertain": uncertainty_triggered,
             "selection_mode": (
-                "unfiltered_fallback"
-                if fallback_mode == "uncertainty_unfiltered"
-                else "broadened_fallback"
-                if fallback_mode == "uncertainty_broadened"
+                "staged_fallback"
+                if fallback_mode == "uncertainty_staged"
                 else "filtered"
             ),
             "selected_law_count": len(routed),
@@ -979,6 +1008,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             "scored_candidates": scored_candidates[:10],
             "routed_law_ids": routed,
             "retrieval_fallback": fallback_mode,
+            "retrieval_fallback_stage": "stage1_broadened" if fallback_mode == "uncertainty_staged" else "none",
             "routing_confidence": routing_confidence,
         }
         logger.debug("Law routing candidates for '%s': %s", query, routed)
@@ -1001,10 +1031,12 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
     def _invoke_retriever(self, query: str, routed_law_ids: list[str] | None = None):
         """Invoke retriever with optional law_id filter; fallback to unfiltered on errors."""
         self._last_routing_diagnostics.setdefault("retrieval_fallback", None)
+        self._last_routing_diagnostics.setdefault("retrieval_fallback_stage", "none")
         if not routed_law_ids:
             return self.retriever.invoke(query)
 
         law_filter = self._build_law_filter(routed_law_ids)
+        stage1_docs = []
         try:
             filtered_retriever = self.vectorstore.as_retriever(
                 search_kwargs={
@@ -1013,14 +1045,55 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
                 }
             )
             docs = filtered_retriever.invoke(query)
-            if docs:
+            stage1_docs = docs or []
+            if stage1_docs and not self._should_escalate_to_stage2_fallback(query, stage1_docs):
+                self._last_routing_diagnostics["retrieval_fallback_stage"] = "stage1_accepted"
                 return docs
-            self._last_routing_diagnostics["retrieval_fallback"] = "empty_filtered_results"
+            self._last_routing_diagnostics["retrieval_fallback"] = "stage1_broadened_low_quality"
+            self._last_routing_diagnostics["retrieval_fallback_stage"] = "stage1_broadened_low_quality"
         except Exception as e:
             logger.warning("Filtered retrieval failed (%s); using unfiltered retrieval.", e)
             self._last_routing_diagnostics["retrieval_fallback"] = f"filtered_retrieval_error:{e}"
+            self._last_routing_diagnostics["retrieval_fallback_stage"] = "stage1_error"
 
-        return self.retriever.invoke(query)
+        if self.settings.law_routing_fallback_unfiltered:
+            self._last_routing_diagnostics["retrieval_fallback"] = "uncertainty_unfiltered_stage2"
+            self._last_routing_diagnostics["retrieval_fallback_stage"] = "stage2_unfiltered"
+            return self.retriever.invoke(query)
+        if stage1_docs:
+            self._last_routing_diagnostics["retrieval_fallback"] = "stage1_low_quality_kept"
+            self._last_routing_diagnostics["retrieval_fallback_stage"] = "stage1_low_quality_kept"
+            return stage1_docs
+        return []
+
+    def _should_escalate_to_stage2_fallback(self, query: str, docs: list) -> bool:
+        """Escalate staged fallback when broadened retrieval quality is too weak."""
+        min_docs = max(1, int(self.settings.law_routing_stage1_min_docs))
+        if len(docs) < min_docs:
+            return True
+        if not self.reranker:
+            return False
+        top_docs = docs[: min(len(docs), self.settings.retrieval_k)]
+        _docs, scores = self._rerank(query, top_docs, top_k=min(3, len(top_docs)))
+        if not scores:
+            return False
+        return float(scores[0]) < float(self.settings.law_routing_stage1_min_top_score)
+
+    def _routing_alignment_map(self) -> dict[str, float]:
+        """Expose per-law routing alignment scores in [0, 1] for rank fusion."""
+        diagnostics = self._last_routing_diagnostics or {}
+        scored_candidates = diagnostics.get("scored_candidates") or []
+        alignment: dict[str, float] = {}
+        for candidate in scored_candidates:
+            law_id = (candidate.get("law_id") or "").strip()
+            if not law_id:
+                continue
+            score = candidate.get("law_reranker_score")
+            lexical = float(candidate.get("lexical_score", 0.0))
+            if score is None:
+                score = min(1.0, lexical / 10.0)
+            alignment[law_id] = max(0.0, min(1.0, float(score)))
+        return alignment
 
     def _apply_reranker_doc_filter(
         self, docs: list, scores: list[float]
@@ -1136,6 +1209,81 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
         )
         return filtered_docs, filtered_scores
 
+    def _apply_law_aware_rank_fusion(
+        self, docs: list, scores: list[float]
+    ) -> tuple[list, list[float], list[float]]:
+        """Apply deterministic law-aware rank fusion after coherence filtering."""
+        self._last_rank_fusion_diagnostics = {"enabled": bool(self.settings.law_rank_fusion_enabled)}
+        if (
+            not self.settings.law_rank_fusion_enabled
+            or not docs
+            or not scores
+            or len(docs) != len(scores)
+        ):
+            self._last_rank_fusion_diagnostics.update({"reason": "disabled_or_missing_scores"})
+            return docs, scores, scores
+
+        candidates: list[dict[str, Any]] = []
+        for idx, (doc, score) in enumerate(zip(docs, scores)):
+            metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+            candidates.append(
+                {
+                    "index": idx,
+                    "law_id": (metadata.get("law_id") or "").strip(),
+                    "score": float(score),
+                    "cross_references": metadata.get("cross_references") or [],
+                }
+            )
+
+        law_affinity = build_law_cross_reference_affinity(
+            candidates,
+            law_ref_to_id=self._law_ref_to_id,
+            settings=self.settings,
+        )
+        fused = build_law_aware_rank_fusion(
+            candidates,
+            self.settings,
+            law_affinity_by_id=law_affinity,
+            routing_alignment_by_id=self._routing_alignment_map(),
+            dominant_context=self._last_coherence_diagnostics,
+        )
+        ranked_rows = fused.get("ranked") or []
+        routing_confidence = (self._last_routing_diagnostics or {}).get("routing_confidence") or {}
+        ranked_rows, cap_diag = apply_uncertainty_law_cap(
+            ranked_rows,
+            fused.get("law_strengths") or {},
+            settings=self.settings,
+            is_uncertain=bool(routing_confidence.get("is_uncertain")),
+        )
+        if not ranked_rows:
+            self._last_rank_fusion_diagnostics.update({"reason": "empty_ranked_rows"})
+            return docs, scores, scores
+
+        # Keep stable, deterministic top-k after fusion.
+        top_k = min(self.settings.retrieval_k, len(ranked_rows))
+        ranked_rows = ranked_rows[:top_k]
+        fused_docs = [docs[int(row["index"])] for row in ranked_rows]
+        fused_scores = [float(row.get("fused_score", row.get("score", 0.0))) for row in ranked_rows]
+        ce_scores_for_gating = [float(row.get("score", 0.0)) for row in ranked_rows]
+        self._last_rank_fusion_diagnostics.update(
+            {
+                "reason": "applied",
+                "fusion": fused.get("diagnostics", {}),
+                "law_strengths": fused.get("law_strengths", {}),
+                "law_cap": cap_diag,
+                "top_rows": [
+                    {
+                        "law_id": row.get("law_id"),
+                        "fused_score": row.get("fused_score"),
+                        "ce_score": row.get("score"),
+                        "components": row.get("fusion_components"),
+                    }
+                    for row in ranked_rows[:5]
+                ],
+            }
+        )
+        return fused_docs, fused_scores, ce_scores_for_gating
+
     def retrieve(
         self, question: str, chat_history: list[Dict[str, str]] | None = None
     ) -> Tuple[list[Dict[str, Any]], float | None, list[float]]:
@@ -1191,8 +1339,11 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             docs, scores = self._apply_reranker_doc_filter(docs, scores)
             if self.settings.law_coherence_filter_enabled:
                 docs, scores = self._filter_by_law_coherence(docs, scores)
-            docs, scores = self._attach_editorial_to_provisions(docs, scores=scores)
+            docs, fused_scores, gate_scores = self._apply_law_aware_rank_fusion(docs, scores)
+            docs, _ = self._attach_editorial_to_provisions(docs, scores=fused_scores)
+            scores = gate_scores
             docs, scores = self._prioritize_doc_types(docs, scores, retrieval_query=retrieval_query)
+            # Confidence gating stays calibrated on CE reranker scores, not fused scores.
             top_score = scores[0] if scores else None
             if top_score is not None:
                 logger.debug(f"Reranked {len(docs)} documents, top score: {top_score:.3f}")

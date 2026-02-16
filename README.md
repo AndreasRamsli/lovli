@@ -20,7 +20,9 @@ Lovli helps private users find information about Norwegian laws using natural la
 - **Confidence gating**: avoids low-confidence answers when retrieval is weak
 - **Conversation-aware**: rewrites follow-up questions using chat history
 - **Law routing (optional)**: lightweight lexical + reranker routing narrows retrieval to likely laws
+- **Staged fallback routing**: uncertainty first broadens to routed law sets, then optionally escalates to unfiltered retrieval
 - **Law coherence filtering**: removes low-confidence singleton sources from non-dominant laws
+- **Law-aware rank fusion**: combines CE score with routing/coherence/affinity signals for deterministic final ordering
 - **Trust profiles**: reusable retrieval/reranking presets for evaluation and threshold sweeps
 - **Law-aware evaluation labels** via `expected_sources` (`law_id` + `article_id`) for stricter citation matching
 - **Streamlit-based chat interface** with inline citations and source links
@@ -112,6 +114,7 @@ Recent retrieval behavior can be tuned without code changes through `.env`:
 - `RERANKER_AMBIGUITY_MIN_GAP`, `RERANKER_AMBIGUITY_TOP_SCORE_CEILING`, `RERANKER_AMBIGUITY_GATING_ENABLED` (ambiguity gating)
 - `LAW_ROUTING_*` (optional law routing thresholds and uncertainty fallback behavior)
 - `LAW_COHERENCE_*` (cross-law contamination guardrails after reranking)
+- `LAW_RANK_FUSION_*` and `LAW_UNCERTAINTY_LAW_CAP_*` (deterministic post-rerank ranking controls)
 - `EDITORIAL_NOTES_PER_PROVISION_CAP`, `EDITORIAL_NOTE_MAX_CHARS`, `EDITORIAL_V2_COMPAT_MODE` (editorial note payload controls)
 - `TRUST_PROFILE_NAME` (preset defaults, e.g. `balanced_v1`, `strict_v1`)
 
@@ -165,7 +168,20 @@ python scripts/sweep_retrieval_thresholds.py
 
 # Analyze cross-law contamination and routing fallback behavior
 python scripts/analyze_law_contamination.py
+
+# Run regression gates by strictness tier (v1, v2, v3)
+python scripts/check_regression_gates.py --gate-tier v2
 ```
+
+## Current status (Feb 2026)
+
+- Runtime now uses staged uncertainty fallback with explicit fallback-stage diagnostics.
+- Confidence gating is calibrated on CE reranker scores; rank fusion only affects final ordering.
+- Strict fallback behavior keeps stage-1 results when stage-2 unfiltered fallback is disabled.
+- Sweep logic now mirrors runtime coherence + law-aware rank fusion + uncertainty law-cap behavior.
+- Contamination analysis includes `hard_cluster_summary` output for mismatch/fallback-heavy clusters.
+- Regression baselines now provide tiered gates (`gates`, `gates_v2`, `gates_v3`) and gate checker supports `--gate-tier`.
+- Calibration diagnostics are emitted in sweep results (`calibration_bins`, `expected_calibration_error`).
 
 ## License
 

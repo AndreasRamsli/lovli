@@ -78,11 +78,13 @@ Build the robust, multi-stage pipeline for full-corpus retrieval.
 
 ### Retrieval Stages
 - [x] **Query analysis**: Classify query type (section lookup, legal question, concept explanation), extract explicit references, detect legal domain, rewrite follow-ups.
-- [x] **Law routing**: Hybrid lexical + reranker law routing with uncertainty-aware fallback to unfiltered/broadened retrieval.
+- [x] **Law routing**: Hybrid lexical + reranker law routing with staged uncertainty fallback and explicit fallback-stage diagnostics.
 - [x] **Filtered hybrid search**: Search article index filtered to candidate laws, combining semantic and keyword matching.
 - [x] **Reranking**: Cross-encoder rescoring of candidates.
 - [x] **Editorial context policy**: Keep provisions primary and attach normalized editorial-note payloads per provision (with compatibility fallback).
 - [x] **Law coherence filtering**: Remove low-confidence singleton sources from non-dominant laws when score gaps indicate contamination.
+- [x] **Law-aware rank fusion**: Deterministic final ordering that combines CE score with routing alignment, affinity, and dominance context.
+- [x] **Uncertainty law cap**: Temporary top-law cap for near-tied uncertainty cases to reduce mismatch-heavy fallback spread.
 - [ ] **Cross-reference expansion**: Automatically fetch articles referenced by the top results (e.g., "jf. § 9-10").
 - [ ] Migrate pipeline orchestration from `create_retrieval_chain` to **LangGraph** for multi-step control flow.
 
@@ -93,10 +95,17 @@ Build the robust, multi-stage pipeline for full-corpus retrieval.
 - [x] Add law-aware expected source labels (`law_id` + `article_id`) to reduce false-positive citation matches.
 - [x] Add post-reindex metadata validation (`missing_doc_type == 0`) and retrieval smoke checks.
 - [x] Add retrieval threshold sweep tooling (`scripts/sweep_retrieval_thresholds.py`) for balanced objective tuning.
-- [x] Add contamination diagnostics (`scripts/analyze_law_contamination.py`) with routing/coherence insights.
+- [x] Add contamination diagnostics (`scripts/analyze_law_contamination.py`) with routing/coherence insights and hard-cluster summaries.
+- [x] Add tiered regression gate baselines (`v1`, `v2`, `v3`) and gate-tier selection in `scripts/check_regression_gates.py`.
+- [x] Add calibration diagnostics to threshold sweeps (`calibration_bins`, `expected_calibration_error`).
 - [ ] Ensure 0 hallucinated law sections in 50 test queries.
 - [ ] Deploy to Streamlit Cloud for private feedback.
 - [ ] Index all 735 laws and regulations from Lovdata bulk downloads.
+
+### Current codebase status (Feb 2026)
+- Runtime/eval parity has been improved for post-rerank logic (coherence + fusion + uncertainty cap).
+- Confidence gating semantics are now explicitly CE-score based.
+- Full end-to-end colab validation for all new controls remains an ongoing operational task.
 
 ## Future Ideas (Post Full-Corpus)
 - **GraphRAG**: Map dependency graph between laws using parsed cross-references.

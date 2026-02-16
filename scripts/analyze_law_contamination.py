@@ -262,6 +262,58 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def build_hard_cluster_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build focused diagnostics for mismatch/fallback-heavy hard clusters."""
+    if not results:
+        return {"cluster_count": 0, "clusters": []}
+
+    cluster_rows: dict[str, list[dict[str, Any]]] = {}
+    mismatch_rows = [row for row in results if row.get("dominant_law_mismatch")]
+    if mismatch_rows:
+        cluster_rows["dominant_law_mismatch"] = mismatch_rows
+
+    fallback_rows = [row for row in results if (row.get("fallback_reason") or "").startswith("uncertainty")]
+    if fallback_rows:
+        cluster_rows["uncertainty_fallback"] = fallback_rows
+
+    # Auto-cluster by repeated (expected laws -> dominant law) mismatch pairs.
+    pair_buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in mismatch_rows:
+        expected = ",".join(sorted(row.get("expected_law_ids") or [])) or "__none__"
+        dominant = (row.get("dominant_law_id") or "__none__").strip()
+        pair_buckets[f"law_pair:{expected}->{dominant}"].append(row)
+    for key, rows in pair_buckets.items():
+        if len(rows) >= 2:
+            cluster_rows[key] = rows
+
+    clusters: list[dict[str, Any]] = []
+    for cluster_id, rows in cluster_rows.items():
+        fallback_reason_dist: dict[str, int] = defaultdict(int)
+        mismatch_count = 0
+        unexpected_count = 0
+        cited_count = 0
+        for row in rows:
+            fallback_reason = (row.get("fallback_reason") or "none").strip()
+            fallback_reason_dist[fallback_reason] += 1
+            mismatch_count += 1 if row.get("dominant_law_mismatch") else 0
+            unexpected_count += int(row.get("unexpected_sources_count") or 0)
+            cited_count += int(row.get("retrieved_sources_count") or 0)
+        clusters.append(
+            {
+                "cluster_id": cluster_id,
+                "question_count": len(rows),
+                "question_ids": [row.get("id") for row in rows],
+                "fallback_reason_distribution": dict(sorted(fallback_reason_dist.items())),
+                "dominant_law_mismatch_rate": (mismatch_count / len(rows)) if rows else 0.0,
+                "unexpected_citation_contribution": (
+                    unexpected_count / cited_count if cited_count else 0.0
+                ),
+            }
+        )
+    clusters.sort(key=lambda item: item["question_count"], reverse=True)
+    return {"cluster_count": len(clusters), "clusters": clusters}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze cross-law contamination in retrieval results.")
     parser.add_argument(
@@ -316,10 +368,12 @@ def main() -> None:
             logger.info("Processed %s/%s questions", idx, len(questions))
 
     aggregate = summarize(rows)
+    hard_cluster_summary = build_hard_cluster_summary(rows)
     report = {
         "trust_profile_name": settings.trust_profile_name,
         "trust_profile_version": settings.trust_profile_version,
         "aggregate": aggregate,
+        "hard_cluster_summary": hard_cluster_summary,
         "per_question": rows,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

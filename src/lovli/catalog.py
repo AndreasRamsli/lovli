@@ -46,6 +46,10 @@ def scan_law_headers(data_dir: Path) -> Iterator[dict]:
     for xml_path in xml_files:
         try:
             header = parse_law_header(xml_path)
+            # Keep catalog contract deterministic across parser versions.
+            header.setdefault("chapter_titles", [])
+            header.setdefault("chapter_titles_normalized", [])
+            header.setdefault("chapter_keywords", [])
             yield header
         except Exception as e:
             logger.warning(f"Failed to parse header from {xml_path.name}: {e}")
