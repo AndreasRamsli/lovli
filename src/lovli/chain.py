@@ -29,6 +29,26 @@ MAX_QUESTION_LENGTH = 1000
 QUERY_REWRITE_MIN_LENGTH_RATIO = 0.5  # Rewritten query must be at least 50% of original length
 QUERY_REWRITE_HISTORY_WINDOW = 4  # Last 4 messages (2 turns) for context
 _ROUTING_TOKEN_RE = re.compile(r"[a-z0-9]{3,}")
+_ROUTING_STOPWORDS = {
+    "og",
+    "som",
+    "kan",
+    "skal",
+    "for",
+    "fra",
+    "med",
+    "ved",
+    "til",
+    "av",
+    "den",
+    "det",
+    "har",
+    "hva",
+    "nar",
+    "eller",
+    "ikke",
+    "etter",
+}
 
 # Confidence gating response (used by both streaming and non-streaming paths)
 GATED_RESPONSE = (
@@ -49,7 +69,8 @@ def _sigmoid(x: float) -> float:
 
 def _tokenize_for_routing(text: str) -> set[str]:
     """Tokenize text for lightweight lexical routing."""
-    return set(_ROUTING_TOKEN_RE.findall((text or "").lower()))
+    tokens = set(_ROUTING_TOKEN_RE.findall((text or "").lower()))
+    return {token for token in tokens if token not in _ROUTING_STOPWORDS}
 
 
 def _normalize_law_mention(text: str) -> str:
@@ -284,7 +305,6 @@ Kontekst fra lovtekster:
                     "routing_tokens": _tokenize_for_routing(routing_text),
                     "short_name_normalized": _normalize_law_mention(short_name),
                     "law_title_normalized": _normalize_law_mention(title),
-                    "short_name_tokens": _tokenize_for_routing(short_name),
                 }
             )
         return entries
@@ -301,7 +321,6 @@ Kontekst fra lovtekster:
             overlap = len(query_tokens & entry["routing_tokens"])
             short_name = entry.get("short_name_normalized") or ""
             law_title = entry.get("law_title_normalized") or ""
-            short_name_tokens = entry.get("short_name_tokens") or set()
 
             direct_mention = False
             if short_name and short_name in query_norm:
@@ -310,9 +329,6 @@ Kontekst fra lovtekster:
             elif law_title and law_title in query_norm:
                 direct_mention = True
                 overlap += 5
-            elif short_name_tokens and (query_tokens & short_name_tokens):
-                direct_mention = True
-                overlap += 3
 
             if overlap < self.settings.law_routing_min_token_overlap:
                 continue
@@ -371,7 +387,6 @@ Kontekst fra lovtekster:
         # Direct law mentions are trusted strongly: keep them high.
         reranked.sort(
             key=lambda item: (
-                item.get("direct_mention", False),
                 item.get("law_reranker_score", 0.0),
                 item.get("lexical_score", 0),
             ),
@@ -869,8 +884,6 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             top = candidates[0]
             top_score = top.get("law_reranker_score")
             if top_score is None:
-                return False
-            if top.get("direct_mention"):
                 return False
             if len(candidates) < 2:
                 return bool(top_score <= self.settings.law_routing_uncertainty_top_score_ceiling)
