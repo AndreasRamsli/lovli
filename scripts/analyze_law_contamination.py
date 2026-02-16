@@ -13,6 +13,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -30,6 +31,16 @@ from lovli.config import get_settings  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+INTENT_TOKEN_RE = re.compile(r"[a-z0-9]{3,}")
+INTENT_TERMS = {
+    "husleie",
+    "depositum",
+    "oppsigelse",
+    "oppsigelsesfrist",
+    "leie",
+    "utleier",
+    "leietaker",
+}
 
 
 def load_questions(path: Path) -> list[dict[str, Any]]:
@@ -54,11 +65,24 @@ def _matches_expected_source(cited_source: dict[str, str], expected_source: dict
     return cited_law == expected_law and cited_article.startswith(expected_article)
 
 
+def _extract_intent_terms(question: str) -> list[str]:
+    """Extract simple lexical intent terms for failure clustering."""
+    tokens = set(INTENT_TOKEN_RE.findall((question or "").lower()))
+    return sorted(tokens & INTENT_TERMS)
+
+
 def analyze_question(chain: LegalRAGChain, row: dict[str, Any], retrieval_k_initial: int) -> dict[str, Any]:
     """Analyze one question and return law-level contamination diagnostics."""
     question = row["question"]
     expected_sources = row.get("expected_sources", []) or []
     expected_articles = row.get("expected_articles", []) or []
+    expected_law_ids = sorted(
+        {
+            (item.get("law_id") or "").strip()
+            for item in expected_sources
+            if (item.get("law_id") or "").strip()
+        }
+    )
 
     routed_law_ids = chain._route_law_ids(question)
     routing_diagnostics = dict(getattr(chain, "_last_routing_diagnostics", {}) or {})
@@ -145,6 +169,21 @@ def analyze_question(chain: LegalRAGChain, row: dict[str, Any], retrieval_k_init
         # For negatives, all citations are unexpected.
         unexpected_sources = cited_sources
 
+    routed_law_ids_normalized = [
+        law_id for law_id in routed_law_ids if (law_id or "").strip()
+    ]
+    route_miss_expected_law = bool(
+        expected_law_ids
+        and routed_law_ids_normalized
+        and set(expected_law_ids).isdisjoint(set(routed_law_ids_normalized))
+    )
+    dominant_law_mismatch = bool(
+        expected_law_ids and dominant_law and dominant_law not in set(expected_law_ids)
+    )
+    fallback_reason = (routing_diagnostics.get("retrieval_fallback") or "").strip()
+    fallback_triggered = bool(fallback_reason)
+    fallback_recovered = bool(fallback_triggered and matched_expected_pairs > 0)
+
     return {
         "id": row.get("id"),
         "question": question,
@@ -158,6 +197,13 @@ def analyze_question(chain: LegalRAGChain, row: dict[str, Any], retrieval_k_init
         "avg_foreign_score_gap": mean(foreign_score_gaps) if foreign_score_gaps else None,
         "matched_expected_source_count": matched_expected_pairs,
         "unexpected_sources_count": len(unexpected_sources),
+        "expected_law_ids": expected_law_ids,
+        "route_miss_expected_law": route_miss_expected_law,
+        "dominant_law_mismatch": dominant_law_mismatch,
+        "fallback_triggered": fallback_triggered,
+        "fallback_reason": fallback_reason or None,
+        "fallback_recovered": fallback_recovered,
+        "intent_terms": _extract_intent_terms(question),
         "routed_law_ids": routed_law_ids,
         "routing_diagnostics": routing_diagnostics,
         "coherence_diagnostics": coherence_diagnostics,
@@ -175,6 +221,24 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     gaps = [r["avg_foreign_score_gap"] for r in results if r.get("avg_foreign_score_gap") is not None]
     unexpected_total = sum(r.get("unexpected_sources_count", 0) for r in results)
     cited_total = sum(r.get("retrieved_sources_count", 0) for r in results)
+    positives = [r for r in results if (r.get("expected_sources") or [])]
+    route_miss_cases = [r for r in positives if r.get("route_miss_expected_law")]
+    dominant_mismatch_cases = [r for r in positives if r.get("dominant_law_mismatch")]
+    fallback_cases = [r for r in results if r.get("fallback_triggered")]
+    fallback_recovered_cases = [r for r in fallback_cases if r.get("fallback_recovered")]
+
+    failing_intent_counts: dict[str, int] = defaultdict(int)
+    for row in route_miss_cases:
+        for term in row.get("intent_terms") or []:
+            failing_intent_counts[term] += 1
+    failing_intent_clusters = sorted(
+        (
+            {"intent_term": term, "count": count}
+            for term, count in failing_intent_counts.items()
+        ),
+        key=lambda item: item["count"],
+        reverse=True,
+    )
 
     return {
         "total_questions": total,
@@ -196,6 +260,14 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
             for r in results
             if (((r.get("coherence_diagnostics") or {}).get("removed_count") or 0) > 0)
         ),
+        "route_miss_expected_law_count": len(route_miss_cases),
+        "route_miss_expected_law_rate": (len(route_miss_cases) / len(positives)) if positives else 0.0,
+        "dominant_law_mismatch_count": len(dominant_mismatch_cases),
+        "dominant_law_mismatch_rate": (len(dominant_mismatch_cases) / len(positives)) if positives else 0.0,
+        "fallback_triggered_count": len(fallback_cases),
+        "fallback_recovered_count": len(fallback_recovered_cases),
+        "fallback_recovery_rate": (len(fallback_recovered_cases) / len(fallback_cases)) if fallback_cases else 0.0,
+        "top_failing_intent_clusters": failing_intent_clusters[:10],
     }
 
 

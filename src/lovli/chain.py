@@ -283,6 +283,8 @@ Kontekst fra lovtekster:
                     "routing_text": routing_text,
                     "routing_tokens": _tokenize_for_routing(routing_text),
                     "short_name_normalized": _normalize_law_mention(short_name),
+                    "law_title_normalized": _normalize_law_mention(title),
+                    "short_name_tokens": _tokenize_for_routing(short_name),
                 }
             )
         return entries
@@ -298,11 +300,19 @@ Kontekst fra lovtekster:
         for entry in self._law_catalog_entries:
             overlap = len(query_tokens & entry["routing_tokens"])
             short_name = entry.get("short_name_normalized") or ""
+            law_title = entry.get("law_title_normalized") or ""
+            short_name_tokens = entry.get("short_name_tokens") or set()
 
             direct_mention = False
             if short_name and short_name in query_norm:
                 direct_mention = True
                 overlap += 5
+            elif law_title and law_title in query_norm:
+                direct_mention = True
+                overlap += 5
+            elif short_name_tokens and (query_tokens & short_name_tokens):
+                direct_mention = True
+                overlap += 3
 
             if overlap < self.settings.law_routing_min_token_overlap:
                 continue
@@ -851,6 +861,28 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
         min_confidence = self.settings.law_routing_min_confidence
         rerank_top_k = self.settings.law_routing_rerank_top_k
         lexical_top_k = self.settings.law_routing_max_candidates
+        fallback_max_laws = self.settings.law_routing_fallback_max_laws
+
+        def _is_uncertain(candidates: list[dict[str, Any]]) -> bool:
+            if not candidates or not self.reranker:
+                return False
+            top = candidates[0]
+            top_score = top.get("law_reranker_score")
+            if top_score is None:
+                return False
+            if top.get("direct_mention"):
+                return False
+            if len(candidates) < 2:
+                return bool(top_score <= self.settings.law_routing_uncertainty_top_score_ceiling)
+            second_score = candidates[1].get("law_reranker_score")
+            if second_score is None:
+                return bool(top_score <= self.settings.law_routing_uncertainty_top_score_ceiling)
+            gap = top_score - second_score
+            return (
+                top_score <= self.settings.law_routing_uncertainty_top_score_ceiling
+                and gap < self.settings.law_routing_uncertainty_min_gap
+            )
+
         if self.reranker:
             selected = [
                 candidate
@@ -859,10 +891,21 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
                 or (candidate.get("law_reranker_score") is not None and candidate.get("law_reranker_score", 0.0) >= min_confidence)
             ]
             if not selected:
-                selected = scored_candidates[:lexical_top_k]
-            routed = [candidate["law_id"] for candidate in selected[:rerank_top_k]]
+                selected = scored_candidates[: max(lexical_top_k, rerank_top_k)]
+            if _is_uncertain(scored_candidates):
+                if self.settings.law_routing_fallback_unfiltered:
+                    routed = []
+                    fallback_mode = "uncertainty_unfiltered"
+                else:
+                    broadened = scored_candidates[:fallback_max_laws]
+                    routed = [candidate["law_id"] for candidate in broadened]
+                    fallback_mode = "uncertainty_broadened"
+            else:
+                routed = [candidate["law_id"] for candidate in selected[:rerank_top_k]]
+                fallback_mode = None
         else:
             routed = [candidate["law_id"] for candidate in scored_candidates[:lexical_top_k]]
+            fallback_mode = None
 
         self._last_routing_diagnostics = {
             "enabled": True,
@@ -870,6 +913,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             "lexical_candidates": lexical_candidates[:10],
             "scored_candidates": scored_candidates[:10],
             "routed_law_ids": routed,
+            "retrieval_fallback": fallback_mode,
         }
         logger.debug("Law routing candidates for '%s': %s", query, routed)
         return routed

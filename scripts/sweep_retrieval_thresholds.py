@@ -279,6 +279,14 @@ def evaluate_combo(
     law_contamination_cases = 0
     law_coherence_filtered_count = 0
     false_positive_gating_count = 0
+    false_positive_confidence_gating_count = 0
+    false_positive_ambiguity_gating_count = 0
+    confidence_gating_count = 0
+    ambiguity_gating_count = 0
+    confidence_threshold_crossings = 0
+    ambiguity_threshold_crossings = 0
+    min_sources_floor_trigger_count = 0
+    scored_query_count = 0
     positive_total = 0
     weighted_positive_recall_numerator = 0.0
     weighted_positive_recall_denominator = 0.0
@@ -318,8 +326,10 @@ def evaluate_combo(
 
         # Simulate per-doc score filtering + floor.
         kept = [c for c in ranked if c["score"] >= min_doc_score]
-        if len(kept) < min(min_sources, len(ranked)):
+        floor_size = min(min_sources, len(ranked))
+        if len(kept) < floor_size:
             kept = ranked[: min(min_sources, len(ranked))]
+            min_sources_floor_trigger_count += 1
         # Attachment model: editorial candidates are attached to provision rows,
         # not appended as standalone documents.
         provision_kept = [c for c in kept if c.get("doc_type") != "editorial_note"]
@@ -344,6 +354,29 @@ def evaluate_combo(
 
         if top_score is not None:
             top_scores.append(top_score)
+            scored_query_count += 1
+            if top_score < confidence_threshold:
+                confidence_threshold_crossings += 1
+            if (
+                len(scores) >= 2
+                and scores[0] <= top_score_ceiling
+                and (scores[0] - scores[1]) < ambiguity_min_gap
+            ):
+                ambiguity_threshold_crossings += 1
+
+        confidence_gate_hit = bool(top_score is not None and top_score < confidence_threshold)
+        ambiguity_gate_hit = bool(
+            not confidence_gate_hit
+            and chain.settings.reranker_ambiguity_gating_enabled
+            and len(scores) >= 2
+            and scores[0] <= top_score_ceiling
+            and (scores[0] - scores[1]) < ambiguity_min_gap
+        )
+        is_gated = confidence_gate_hit or ambiguity_gate_hit
+        if confidence_gate_hit:
+            confidence_gating_count += 1
+        elif ambiguity_gate_hit:
+            ambiguity_gating_count += 1
 
         if expected:
             retrieval_total += 1
@@ -410,17 +443,6 @@ def evaluate_combo(
         else:
             # Ambiguous / off-topic guardrail: ideally no sources, or gated.
             ambiguity_total += 1
-            is_gated = False
-            if top_score is not None and top_score < confidence_threshold:
-                is_gated = True
-            if (
-                not is_gated
-                and chain.settings.reranker_ambiguity_gating_enabled
-                and len(scores) >= 2
-                and scores[0] <= top_score_ceiling
-            ):
-                if (scores[0] - scores[1]) < ambiguity_min_gap:
-                    is_gated = True
             if is_gated or not cited_ids:
                 ambiguity_clean += 1
                 segment["negative"]["clean"] += 1
@@ -441,19 +463,12 @@ def evaluate_combo(
                     core_segment[segment_key]["total"] += 1
 
         if expected:
-            is_gated = False
-            if top_score is not None and top_score < confidence_threshold:
-                is_gated = True
-            if (
-                not is_gated
-                and chain.settings.reranker_ambiguity_gating_enabled
-                and len(scores) >= 2
-                and scores[0] <= top_score_ceiling
-                and (scores[0] - scores[1]) < ambiguity_min_gap
-            ):
-                is_gated = True
             if is_gated:
                 false_positive_gating_count += 1
+                if confidence_gate_hit:
+                    false_positive_confidence_gating_count += 1
+                elif ambiguity_gate_hit:
+                    false_positive_ambiguity_gating_count += 1
 
         if expects_editorial_context:
             editorial_expected_total += 1
@@ -583,6 +598,12 @@ def evaluate_combo(
         if weighted_positive_recall_denominator
         else 0.0
     )
+    confidence_threshold_crossing_rate = (
+        confidence_threshold_crossings / scored_query_count if scored_query_count else 0.0
+    )
+    ambiguity_threshold_crossing_rate = (
+        ambiguity_threshold_crossings / scored_query_count if scored_query_count else 0.0
+    )
 
     metrics = {
         "recall_at_k": recall_at_k,
@@ -605,7 +626,14 @@ def evaluate_combo(
         "unexpected_citation_rate": unexpected_citation_rate,
         "law_contamination_rate": law_contamination_rate,
         "law_coherence_filtered_count": law_coherence_filtered_count,
+        "min_sources_floor_trigger_count": min_sources_floor_trigger_count,
+        "confidence_gating_count": confidence_gating_count,
+        "ambiguity_gating_count": ambiguity_gating_count,
         "false_positive_gating_rate": false_positive_gating_rate,
+        "false_positive_confidence_gating_count": false_positive_confidence_gating_count,
+        "false_positive_ambiguity_gating_count": false_positive_ambiguity_gating_count,
+        "confidence_threshold_crossing_rate": confidence_threshold_crossing_rate,
+        "ambiguity_threshold_crossing_rate": ambiguity_threshold_crossing_rate,
         "coverage_weighted_positive_recall": coverage_weighted_positive_recall,
         "editorial_context_success": editorial_context_success,
         "core_editorial_context_success": core_editorial_context_success,
@@ -624,6 +652,7 @@ def apply_combo_to_chain(
     min_doc: float,
     min_gap: float,
     top_score_ceiling: float,
+    routing_fallback_unfiltered: bool,
 ) -> None:
     """Apply sweep parameters to an existing chain instance."""
     chain.settings.retrieval_k_initial = retrieval_k_initial
@@ -632,6 +661,7 @@ def apply_combo_to_chain(
     chain.settings.reranker_min_doc_score = min_doc
     chain.settings.reranker_ambiguity_min_gap = min_gap
     chain.settings.reranker_ambiguity_top_score_ceiling = top_score_ceiling
+    chain.settings.law_routing_fallback_unfiltered = routing_fallback_unfiltered
 
 
 def main() -> None:
@@ -653,10 +683,11 @@ def main() -> None:
 
     retrieval_k_initial_values = [15, 20]
     retrieval_k_values = [3, 5]
-    confidence_values = [0.35, 0.45]
-    min_doc_values = [0.35, 0.45, 0.55]
+    confidence_values = [0.30, 0.35, 0.45, 0.55]
+    min_doc_values = [0.25, 0.35, 0.45, 0.55]
     min_gap_values = [0.05, 0.10]
     top_score_ceiling_values = [0.60, 0.70]
+    routing_fallback_unfiltered_values = [True, False]
 
     logger.info("Loaded %s questions", len(questions))
     core_count = sum(1 for row in questions if row.get("id") in CORE_QUESTION_IDS)
@@ -666,24 +697,49 @@ def main() -> None:
     skip_index_scan = _env_flag("SWEEP_SKIP_INDEX_SCAN", default=True)
     validate_questions(questions, chain, skip_index_scan=skip_index_scan)
     max_k_initial = max(retrieval_k_initial_values)
-    logger.info("Precomputing candidates once with k=%s...", max_k_initial)
-    cached_candidates = precompute_candidates(chain, questions, max_k_initial=max_k_initial)
+    cached_candidates_by_fallback: dict[bool, list[dict]] = {}
+    for fallback_unfiltered in routing_fallback_unfiltered_values:
+        chain.settings.law_routing_fallback_unfiltered = fallback_unfiltered
+        logger.info(
+            "Precomputing candidates with k=%s (routing_fallback_unfiltered=%s)...",
+            max_k_initial,
+            fallback_unfiltered,
+        )
+        cached_candidates_by_fallback[fallback_unfiltered] = precompute_candidates(
+            chain, questions, max_k_initial=max_k_initial
+        )
 
     rows: list[dict] = []
-    for retrieval_k_initial, retrieval_k, confidence, min_doc, min_gap, top_score_ceiling in itertools.product(
+    for (
+        retrieval_k_initial,
+        retrieval_k,
+        confidence,
+        min_doc,
+        min_gap,
+        top_score_ceiling,
+        routing_fallback_unfiltered,
+    ) in itertools.product(
         retrieval_k_initial_values,
         retrieval_k_values,
         confidence_values,
         min_doc_values,
         min_gap_values,
         top_score_ceiling_values,
+        routing_fallback_unfiltered_values,
     ):
         apply_combo_to_chain(
-            chain, retrieval_k_initial, retrieval_k, confidence, min_doc, min_gap, top_score_ceiling
+            chain,
+            retrieval_k_initial,
+            retrieval_k,
+            confidence,
+            min_doc,
+            min_gap,
+            top_score_ceiling,
+            routing_fallback_unfiltered,
         )
         metrics = evaluate_combo(
             chain,
-            cached_candidates,
+            cached_candidates_by_fallback[routing_fallback_unfiltered],
             retrieval_k_initial=retrieval_k_initial,
             confidence_threshold=confidence,
             min_doc_score=min_doc,
@@ -697,14 +753,15 @@ def main() -> None:
             "reranker_min_doc_score": min_doc,
             "reranker_ambiguity_min_gap": min_gap,
             "reranker_ambiguity_top_score_ceiling": top_score_ceiling,
+            "law_routing_fallback_unfiltered": routing_fallback_unfiltered,
             **metrics,
         }
         rows.append(row)
         logger.info(
-            "k_init=%s k=%s conf=%.2f min_doc=%.2f min_gap=%.2f top_ceiling=%.2f -> "
+            "k_init=%s k=%s conf=%.2f min_doc=%.2f min_gap=%.2f top_ceiling=%.2f route_unfiltered=%s -> "
             "balanced=%.3f recall=%.3f coverage=%.3f precision=%.3f unexpected=%.3f "
             "law_contam=%.3f coherence_dropped=%s "
-            "fp_gate=%.3f cw_recall=%.3f "
+            "fp_gate=%.3f cw_recall=%.3f floor_triggers=%s conf_gate=%s amb_gate=%s "
             "single=%.3f multi=%.3f neg=%.3f neg_legal=%.3f neg_nonlegal=%.3f "
             "editorial=%.3f non_editorial_clean=%.3f avg_top=%.3f",
             retrieval_k_initial,
@@ -713,6 +770,7 @@ def main() -> None:
             min_doc,
             min_gap,
             top_score_ceiling,
+            routing_fallback_unfiltered,
             metrics["balanced_score"],
             metrics["recall_at_k"],
             metrics["mean_expected_coverage"],
@@ -722,6 +780,9 @@ def main() -> None:
             metrics["law_coherence_filtered_count"],
             metrics["false_positive_gating_rate"],
             metrics["coverage_weighted_positive_recall"],
+            metrics["min_sources_floor_trigger_count"],
+            metrics["confidence_gating_count"],
+            metrics["ambiguity_gating_count"],
             metrics["single_article_recall_at_k"],
             metrics["multi_article_recall_at_k"],
             metrics["negative_success"],

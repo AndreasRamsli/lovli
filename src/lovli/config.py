@@ -150,28 +150,50 @@ class Settings(BaseSettings):
         description="Path to the law catalog JSON used for routing.",
     )
     law_routing_max_candidates: int = Field(
-        default=3,
+        default=6,
         ge=1,
-        le=10,
+        le=20,
         description="Maximum number of candidate laws to route to before retrieval.",
     )
     law_routing_prefilter_k: int = Field(
-        default=20,
+        default=80,
         ge=3,
         le=200,
         description="Maximum lexical routing candidates to score in the hybrid law routing prefilter.",
     )
     law_routing_rerank_top_k: int = Field(
-        default=2,
+        default=6,
         ge=1,
-        le=10,
+        le=20,
         description="Number of top laws to keep after law-level reranker scoring.",
     )
     law_routing_min_confidence: float = Field(
-        default=0.40,
+        default=0.30,
         ge=0.0,
         le=1.0,
         description="Minimum sigmoid-normalized law reranker score required for routed law candidates.",
+    )
+    law_routing_uncertainty_top_score_ceiling: float = Field(
+        default=0.55,
+        ge=0.0,
+        le=1.0,
+        description="If top routed law score is at or below this ceiling and score gap is small, routing can fall back to broader retrieval.",
+    )
+    law_routing_uncertainty_min_gap: float = Field(
+        default=0.04,
+        ge=0.0,
+        le=1.0,
+        description="Minimum gap between top-1 and top-2 law reranker scores to treat routing as confident.",
+    )
+    law_routing_fallback_unfiltered: bool = Field(
+        default=True,
+        description="When routing scores are uncertain, skip law filtering and use unfiltered retrieval.",
+    )
+    law_routing_fallback_max_laws: int = Field(
+        default=12,
+        ge=1,
+        le=50,
+        description="Maximum number of routed laws to keep when uncertainty fallback uses broadened routing instead of unfiltered retrieval.",
     )
     law_routing_min_token_overlap: int = Field(
         default=1,
