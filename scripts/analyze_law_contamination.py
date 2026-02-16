@@ -28,6 +28,8 @@ sys.path.insert(0, str(ROOT_DIR / "src"))
 
 from lovli.chain import LegalRAGChain  # noqa: E402
 from lovli.config import get_settings  # noqa: E402
+from lovli.retrieval_shared import matches_expected_source  # noqa: E402
+from lovli.trust_profiles import apply_trust_profile  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -52,17 +54,6 @@ def load_questions(path: Path) -> list[dict[str, Any]]:
             if line:
                 questions.append(json.loads(line))
     return questions
-
-
-def _matches_expected_source(cited_source: dict[str, str], expected_source: dict[str, str]) -> bool:
-    """Match law_id exactly and article_id by prefix for compatibility."""
-    cited_law = (cited_source.get("law_id") or "").strip()
-    cited_article = (cited_source.get("article_id") or "").strip()
-    expected_law = (expected_source.get("law_id") or "").strip()
-    expected_article = (expected_source.get("article_id") or "").strip()
-    if not expected_law or not expected_article:
-        return False
-    return cited_law == expected_law and cited_article.startswith(expected_article)
 
 
 def _extract_intent_terms(question: str) -> list[str]:
@@ -160,10 +151,10 @@ def analyze_question(chain: LegalRAGChain, row: dict[str, Any], retrieval_k_init
     matched_expected_pairs = 0
     if expected_sources:
         for cited in cited_sources:
-            if not any(_matches_expected_source(cited, exp) for exp in expected_sources):
+            if not any(matches_expected_source(cited, exp) for exp in expected_sources):
                 unexpected_sources.append(cited)
         matched_expected_pairs = sum(
-            1 for exp in expected_sources if any(_matches_expected_source(cited, exp) for cited in cited_sources)
+            1 for exp in expected_sources if any(matches_expected_source(cited, exp) for cited in cited_sources)
         )
     else:
         # For negatives, all citations are unexpected.
@@ -301,6 +292,13 @@ def main() -> None:
 
     load_dotenv(ROOT_DIR / ".env")
     settings = get_settings()
+    profile_name = os.getenv("TRUST_PROFILE", settings.trust_profile_name)
+    resolved_profile = apply_trust_profile(settings, profile_name)
+    logger.info(
+        "Using trust profile: %s (version=%s)",
+        resolved_profile,
+        settings.trust_profile_version,
+    )
     if args.retrieval_k_initial is not None and args.retrieval_k_initial > 0:
         settings.retrieval_k_initial = args.retrieval_k_initial
     chain = LegalRAGChain(settings=settings)
@@ -318,7 +316,12 @@ def main() -> None:
             logger.info("Processed %s/%s questions", idx, len(questions))
 
     aggregate = summarize(rows)
-    report = {"aggregate": aggregate, "per_question": rows}
+    report = {
+        "trust_profile_name": settings.trust_profile_name,
+        "trust_profile_version": settings.trust_profile_version,
+        "aggregate": aggregate,
+        "per_question": rows,
+    }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as handle:
         json.dump(report, handle, ensure_ascii=False, indent=2)

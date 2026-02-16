@@ -11,14 +11,17 @@ Lovli helps private users find information about Norwegian laws using natural la
 ## Features
 
 - **Natural language queries** about Norwegian laws
-- **Multi-stage retrieval**: query analysis -> hybrid search -> reranking -> generation
+- **Multi-stage retrieval**: query rewrite -> optional law routing -> hybrid search -> reranking -> generation
 - **Hybrid search** combining semantic (dense) and keyword (sparse) matching using BGE-M3
 - **Cross-encoder reranking** using `bge-reranker-v2-m3` for high precision
-- **Adaptive editorial context**: provisions are prioritized, while editorial notes are included as supplemental context when budget and query intent indicate relevance
+- **Provision-first context assembly**: editorial notes are attached per provision and normalized deterministically
 - **Hierarchical parsing**: extracts Law -> Chapter -> Section structure
 - **Cross-reference extraction**: captures links between different laws
 - **Confidence gating**: avoids low-confidence answers when retrieval is weak
 - **Conversation-aware**: rewrites follow-up questions using chat history
+- **Law routing (optional)**: lightweight lexical + reranker routing narrows retrieval to likely laws
+- **Law coherence filtering**: removes low-confidence singleton sources from non-dominant laws
+- **Trust profiles**: reusable retrieval/reranking presets for evaluation and threshold sweeps
 - **Law-aware evaluation labels** via `expected_sources` (`law_id` + `article_id`) for stricter citation matching
 - **Streamlit-based chat interface** with inline citations and source links
 - **Evaluation via LangSmith** with LLM-as-judge metrics
@@ -104,10 +107,13 @@ Lovli requires legal data from Lovdata's bulk downloads.
 
 Recent retrieval behavior can be tuned without code changes through `.env`:
 
-- `RETRIEVAL_K_INITIAL` (over-retrieval before reranking)
-- `RERANKER_MIN_DOC_SCORE` and `RERANKER_MIN_SOURCES` (per-doc filtering safety floor)
-- `RERANKER_AMBIGUITY_MIN_GAP` and `RERANKER_AMBIGUITY_TOP_SCORE_CEILING` (ambiguity gating)
-- `EDITORIAL_BASE_MAX_NOTES`, `EDITORIAL_MAX_NOTES`, `EDITORIAL_CONTEXT_BUDGET_RATIO`, `EDITORIAL_HISTORY_INTENT_BOOST` (adaptive editorial context budgeting)
+- `RETRIEVAL_K` and `RETRIEVAL_K_INITIAL` (final result size and over-retrieval before reranking)
+- `RERANKER_CONFIDENCE_THRESHOLD`, `RERANKER_MIN_DOC_SCORE`, `RERANKER_MIN_SOURCES` (confidence and per-doc filtering)
+- `RERANKER_AMBIGUITY_MIN_GAP`, `RERANKER_AMBIGUITY_TOP_SCORE_CEILING`, `RERANKER_AMBIGUITY_GATING_ENABLED` (ambiguity gating)
+- `LAW_ROUTING_*` (optional law routing thresholds and uncertainty fallback behavior)
+- `LAW_COHERENCE_*` (cross-law contamination guardrails after reranking)
+- `EDITORIAL_NOTES_PER_PROVISION_CAP`, `EDITORIAL_NOTE_MAX_CHARS`, `EDITORIAL_V2_COMPAT_MODE` (editorial note payload controls)
+- `TRUST_PROFILE_NAME` (preset defaults, e.g. `balanced_v1`, `strict_v1`)
 
 ### Running the Application
 
@@ -149,6 +155,16 @@ We use **LangSmith** for comprehensive evaluation. Results are tracked with metr
 ```bash
 # Run evaluation experiment
 python scripts/eval_langsmith.py
+```
+
+### Retrieval tuning and diagnostics
+
+```bash
+# Sweep retrieval/reranker thresholds against eval/questions.jsonl
+python scripts/sweep_retrieval_thresholds.py
+
+# Analyze cross-law contamination and routing fallback behavior
+python scripts/analyze_law_contamination.py
 ```
 
 ## License

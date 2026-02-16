@@ -68,20 +68,21 @@ Enrich the data layer to support multi-law retrieval and cross-referencing.
 - [x] **Canonical article IDs + source anchors**: Normalize paragraph IDs while preserving original Lovdata anchor IDs.
 - [x] **Document typing**: Classify and store `doc_type` (`provision` vs `editorial_note`) for retrieval formatting and ranking policy.
 
-## Phase 6: Multi-Stage Retrieval Pipeline (Next)
+## Phase 6: Multi-Stage Retrieval Pipeline (In Progress)
 Build the robust, multi-stage pipeline for full-corpus retrieval.
 
 ### Three-Tier Indexing
-- [ ] **Tier 0 — Law catalog**: Structured table of all 735 laws with summaries. Small enough to fit in a prompt for routing (~50k tokens). [DONE: Generation implemented]
+- [x] **Tier 0 — Law catalog**: Structured table of all 735 laws with summaries for routing. [DONE]
 - [ ] **Tier 1 — Chapter-level index**: ~3,000-5,000 vectorized chapter summaries for narrowing within a law.
 - [ ] **Tier 2 — Article-level index**: Full article text with hybrid search (dense + sparse) and rich metadata filters. [DONE: Husleieloven indexed]
 
 ### Retrieval Stages
 - [x] **Query analysis**: Classify query type (section lookup, legal question, concept explanation), extract explicit references, detect legal domain, rewrite follow-ups.
-- [ ] **Law routing**: For broad questions, use LLM + law catalog to identify 1-3 candidate laws before retrieval.
+- [x] **Law routing**: Hybrid lexical + reranker law routing with uncertainty-aware fallback to unfiltered/broadened retrieval.
 - [x] **Filtered hybrid search**: Search article index filtered to candidate laws, combining semantic and keyword matching.
 - [x] **Reranking**: Cross-encoder rescoring of candidates.
-- [x] **Editorial context policy**: Keep provisions primary and include editorial notes with adaptive, intent-aware budget.
+- [x] **Editorial context policy**: Keep provisions primary and attach normalized editorial-note payloads per provision (with compatibility fallback).
+- [x] **Law coherence filtering**: Remove low-confidence singleton sources from non-dominant laws when score gaps indicate contamination.
 - [ ] **Cross-reference expansion**: Automatically fetch articles referenced by the top results (e.g., "jf. § 9-10").
 - [ ] Migrate pipeline orchestration from `create_retrieval_chain` to **LangGraph** for multi-step control flow.
 
@@ -91,6 +92,8 @@ Build the robust, multi-stage pipeline for full-corpus retrieval.
 - [ ] Measure each pipeline stage independently (routing accuracy, retrieval recall, reranker precision, answer quality).
 - [x] Add law-aware expected source labels (`law_id` + `article_id`) to reduce false-positive citation matches.
 - [x] Add post-reindex metadata validation (`missing_doc_type == 0`) and retrieval smoke checks.
+- [x] Add retrieval threshold sweep tooling (`scripts/sweep_retrieval_thresholds.py`) for balanced objective tuning.
+- [x] Add contamination diagnostics (`scripts/analyze_law_contamination.py`) with routing/coherence insights.
 - [ ] Ensure 0 hallucinated law sections in 50 test queries.
 - [ ] Deploy to Streamlit Cloud for private feedback.
 - [ ] Index all 735 laws and regulations from Lovdata bulk downloads.

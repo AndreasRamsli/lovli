@@ -9,7 +9,6 @@ you can quickly pick robust defaults before full LangSmith runs.
 import itertools
 import json
 import logging
-import math
 import os
 import sys
 from pathlib import Path
@@ -26,6 +25,12 @@ sys.path.insert(0, str(ROOT_DIR / "src"))
 from lovli.chain import LegalRAGChain, _infer_doc_type  # noqa: E402
 from lovli.config import get_settings  # noqa: E402
 from lovli.eval_utils import infer_negative_type, validate_questions  # noqa: E402
+from lovli.retrieval_shared import (  # noqa: E402
+    build_law_coherence_decision,
+    matches_expected_source,
+    normalize_sigmoid_scores,
+)
+from lovli.trust_profiles import apply_trust_profile  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -42,17 +47,6 @@ CORE_QUESTION_IDS = {
 def matches_expected(cited_id: str, expected_set: set[str]) -> bool:
     """Prefix-match cited article IDs against expected IDs."""
     return any(cited_id.startswith(exp) for exp in expected_set)
-
-
-def _matches_expected_source(cited_source: dict, expected_source: dict) -> bool:
-    """Check precise law-aware match with prefix-compatible article ID semantics."""
-    cited_law = (cited_source.get("law_id") or "").strip()
-    cited_article = (cited_source.get("article_id") or "").strip()
-    expected_law = (expected_source.get("law_id") or "").strip()
-    expected_article = (expected_source.get("article_id") or "").strip()
-    if not expected_law or not expected_article:
-        return False
-    return cited_law == expected_law and cited_article.startswith(expected_article)
 
 
 def load_questions(path: Path) -> list[dict]:
@@ -125,57 +119,22 @@ def _compute_balanced_score(metrics: dict) -> float:
     return accuracy_component + abstention_component - penalties
 
 
+def _is_profile_default_row(row: dict, profile_defaults: dict) -> bool:
+    """Return True when a sweep row exactly matches active profile defaults."""
+    for key, expected in profile_defaults.items():
+        if row.get(key) != expected:
+            return False
+    return True
+
+
 def _apply_law_coherence_filter_candidates(candidates: list[dict], settings) -> tuple[list[dict], int]:
     """Apply runtime-equivalent law coherence filtering on scored candidate dicts."""
-    if not candidates or len(candidates) < 2:
-        return candidates, 0
     if not settings.law_coherence_filter_enabled:
         return candidates, 0
-
-    grouped: dict[str, list[tuple[int, dict]]] = {}
-    for idx, candidate in enumerate(candidates):
-        law_id = (candidate.get("law_id") or "").strip() or "__unknown__"
-        grouped.setdefault(law_id, []).append((idx, candidate))
-    if len(grouped) <= 1:
-        return candidates, 0
-
-    max_weight = settings.law_coherence_max_score_weight
-    avg_weight = 1.0 - max_weight
-    law_stats: list[tuple[str, int, float, float, float]] = []
-    for law_id, indexed_items in grouped.items():
-        law_scores = [float(item.get("score", 0.0)) for _idx, item in indexed_items]
-        avg_score = sum(law_scores) / len(law_scores) if law_scores else 0.0
-        max_score = max(law_scores) if law_scores else 0.0
-        strength = (avg_weight * avg_score) + (max_weight * max_score)
-        law_stats.append((law_id, len(indexed_items), avg_score, max_score, strength))
-    law_stats.sort(key=lambda item: (item[1], item[4], item[3], item[2]), reverse=True)
-
-    dominant_law_id, _dominant_count, _dominant_avg_score, _dominant_max_score, dominant_strength = law_stats[0]
-    _ = dominant_law_id  # Keep variable for readability symmetry with runtime method.
-
-    drop_indices: set[int] = set()
-    for law_id, law_count, _law_avg_score, _law_max_score, law_strength in law_stats[1:]:
-        if law_count >= settings.law_coherence_min_law_count:
-            continue
-        abs_gap = dominant_strength - law_strength
-        relative_gap = (abs_gap / dominant_strength) if dominant_strength > 0 else 0.0
-        if (
-            abs_gap < settings.law_coherence_score_gap
-            and relative_gap < settings.law_coherence_relative_gap
-        ):
-            continue
-        drop_indices.update(idx for idx, _item in grouped.get(law_id, []))
-
+    decision = build_law_coherence_decision(candidates, settings)
+    drop_indices = set(decision.get("drop_indices", set()))
     if not drop_indices:
         return candidates, 0
-
-    min_sources_floor = min(max(settings.law_coherence_min_keep, 1), len(candidates))
-    if (len(candidates) - len(drop_indices)) < min_sources_floor:
-        sorted_drop_indices = sorted(drop_indices, key=lambda idx: candidates[idx].get("score", 0.0), reverse=True)
-        required_keep = min_sources_floor - (len(candidates) - len(drop_indices))
-        keep_back = set(sorted_drop_indices[:required_keep])
-        drop_indices = set(idx for idx in drop_indices if idx not in keep_back)
-
     filtered = [item for idx, item in enumerate(candidates) if idx not in drop_indices]
     return filtered, len(drop_indices)
 
@@ -212,11 +171,7 @@ def precompute_candidates(
                 for doc in docs
             ]
             raw_scores = chain.reranker.predict(pairs) if chain.reranker else [1.0] * len(docs)
-            if hasattr(raw_scores, "tolist"):
-                raw_scores = raw_scores.tolist()
-            scores = [float(s) for s in raw_scores]
-            # Convert logits to [0, 1] consistently with runtime pipeline.
-            normalized = [1.0 / (1.0 + math.exp(-s)) for s in scores]
+            normalized = normalize_sigmoid_scores(raw_scores)
             for doc, score in zip(docs, normalized):
                 metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
                 candidates.append(
@@ -387,7 +342,7 @@ def evaluate_combo(
                 for cited in cited_sources:
                     hit = False
                     for exp in expected_sources:
-                        if _matches_expected_source(cited, exp):
+                        if matches_expected_source(cited, exp):
                             pair_key = (exp.get("law_id", ""), exp.get("article_id", ""))
                             matched_expected_pairs.add(pair_key)
                             hit = True
@@ -680,6 +635,22 @@ def main() -> None:
             questions = questions[:sample_size]
             logger.info("Using sample size from SWEEP_SAMPLE_SIZE=%s", sample_size)
     settings = get_settings()
+    profile_name = os.getenv("TRUST_PROFILE", settings.trust_profile_name)
+    resolved_profile = apply_trust_profile(settings, profile_name)
+    logger.info(
+        "Using trust profile: %s (version=%s)",
+        resolved_profile,
+        settings.trust_profile_version,
+    )
+    profile_defaults = {
+        "retrieval_k_initial": settings.retrieval_k_initial,
+        "retrieval_k": settings.retrieval_k,
+        "reranker_confidence_threshold": settings.reranker_confidence_threshold,
+        "reranker_min_doc_score": settings.reranker_min_doc_score,
+        "reranker_ambiguity_min_gap": settings.reranker_ambiguity_min_gap,
+        "reranker_ambiguity_top_score_ceiling": settings.reranker_ambiguity_top_score_ceiling,
+        "law_routing_fallback_unfiltered": settings.law_routing_fallback_unfiltered,
+    }
 
     retrieval_k_initial_values = [15, 20]
     retrieval_k_values = [3, 5]
@@ -747,6 +718,9 @@ def main() -> None:
             top_score_ceiling=top_score_ceiling,
         )
         row = {
+            "trust_profile_name": settings.trust_profile_name,
+            "trust_profile_version": settings.trust_profile_version,
+            "sweep_source_profile_name": resolved_profile,
             "retrieval_k_initial": retrieval_k_initial,
             "retrieval_k": retrieval_k,
             "reranker_confidence_threshold": confidence,
@@ -756,6 +730,7 @@ def main() -> None:
             "law_routing_fallback_unfiltered": routing_fallback_unfiltered,
             **metrics,
         }
+        row["is_profile_default_row"] = _is_profile_default_row(row, profile_defaults)
         rows.append(row)
         logger.info(
             "k_init=%s k=%s conf=%.2f min_doc=%.2f min_gap=%.2f top_ceiling=%.2f route_unfiltered=%s -> "

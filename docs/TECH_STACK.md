@@ -7,7 +7,7 @@ Lovli is an LLM-powered legal information tool using a multi-stage Retrieval-Aug
 
 ## Current Stack (2026)
 
-|| Component | Choice | Description |
+| Component | Choice | Description |
 |-----------|--------|-------------|
 | **Language** | Python 3.11+ | Primary language for data processing and RAG. |
 | **RAG Framework** | [LangChain](https://www.langchain.com/) | Orchestrates retrieval, generation, and streaming. |
@@ -20,7 +20,7 @@ Lovli is an LLM-powered legal information tool using a multi-stage Retrieval-Aug
 
 ## Planned Additions
 
-|| Component | Choice | Purpose |
+| Component | Choice | Purpose |
 |-----------|--------|---------|
 | **Pipeline Orchestration** | [LangGraph](https://langchain-ai.github.io/langgraph/) | Multi-step retrieval pipeline with conditional routing and agent loops. Replaces `create_retrieval_chain` for complex flows. |
 | **GraphRAG** | TBD | Mapping legal dependencies and cross-references. |
@@ -47,18 +47,17 @@ Lovli is an LLM-powered legal information tool using a multi-stage Retrieval-Aug
 ## Retrieval Pipeline
 
 ### Current
-Multi-stage retrieval: query analysis -> hybrid search -> reranking -> doc-type prioritization -> generation.
+Multi-stage retrieval: query rewrite -> optional law routing -> hybrid retrieval -> reranking -> law coherence filtering -> generation.
 
 ### Target Architecture
 ```
 User Question
     |
     v
-Query Analysis (classify, rewrite, extract refs)
+Query Rewrite + Validation
     |
-    +-- Direct lookup (if explicit section reference)
-    |
-    +-- Law Routing (LLM picks 1-3 candidate laws from catalog)
+    +-- Optional Law Routing (lexical prefilter + law-level reranker)
+    |      with uncertainty fallback
             |
             v
       Hybrid Search (dense + sparse, filtered by law)
@@ -67,14 +66,11 @@ Query Analysis (classify, rewrite, extract refs)
       Reranking (cross-encoder, top 5)
             |
             v
-      Doc-Type Prioritization
-      (provisions first, editorial notes as adaptive supplemental context)
+      Law Coherence Filtering
+      (remove weak singleton sources from non-dominant laws)
             |
             v
-      Cross-Reference Expansion (fetch referenced sections)
-            |
-            v
-      Answer Generation (streaming, with inline citations)
+      Answer Generation (streaming, with confidence/ambiguity gating)
 ```
 
 ## Infrastructure
@@ -89,5 +85,5 @@ Query Analysis (classify, rewrite, extract refs)
 - **Model Flexibility**: OpenRouter provides access to 100+ models through a single API, allowing easy model switching and benchmarking.
 - **Norwegian Support**: BGE-M3 and bge-reranker-v2-m3 are multilingual models with strong Norwegian performance.
 - **Hybrid Search**: Legal text requires both semantic understanding ("tenant rights" ~ "leietakers rettigheter") and exact matching ("§ 3-5"). BGE-M3's dual dense+sparse output makes this seamless in Qdrant.
-- **LangGraph over simple chains**: Multi-stage retrieval with conditional routing (skip routing for direct lookups, add cross-reference expansion when needed) requires a graph-based orchestrator, not a linear chain.
+- **Law-first guardrails**: Routing + reranker + coherence filtering reduce cross-law contamination in a 735+ law corpus.
 - **Evaluation-Driven**: Every architectural change is measured via LangSmith experiments. We only keep changes that improve eval scores.

@@ -75,6 +75,14 @@ class Settings(BaseSettings):
         le=50,
         description="Number of documents to retrieve before reranking (over-retrieve for reranker)",
     )
+    trust_profile_name: str = Field(
+        default="balanced_v1",
+        description="Named trust profile for retrieval/routing/gating defaults (e.g. balanced_v1, strict_v1).",
+    )
+    trust_profile_version: str = Field(
+        default="2026-02-16",
+        description="Version tag for the active trust profile.",
+    )
     
     # Reranker Configuration
     reranker_model: str = Field(

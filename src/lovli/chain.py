@@ -1,7 +1,6 @@
 """LangChain RAG pipeline for legal question answering."""
 
 import logging
-import math
 import re
 from pathlib import Path
 from typing import Dict, Any, Iterator, Tuple
@@ -20,6 +19,11 @@ from .editorial import (
     collect_provision_article_pairs,
     collect_provision_law_chapter_pairs,
     dedupe_by_law_article,
+)
+from .retrieval_shared import (
+    build_law_coherence_decision,
+    normalize_sigmoid_scores,
+    sigmoid,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,11 +64,7 @@ NO_RESULTS_RESPONSE = "Beklager, jeg kunne ikke finne informasjon om dette spør
 
 def _sigmoid(x: float) -> float:
     """Apply sigmoid function to map raw logits to [0, 1] probability."""
-    try:
-        return 1.0 / (1.0 + math.exp(-x))
-    except OverflowError:
-        # exp(-x) overflows for very negative x -> sigmoid approaches 0
-        return 0.0
+    return sigmoid(x)
 
 
 def _tokenize_for_routing(text: str) -> set[str]:
@@ -367,11 +367,7 @@ Kontekst fra lovtekster:
         ]
         try:
             raw_scores = self.reranker.predict(pairs)
-            if hasattr(raw_scores, "tolist"):
-                raw_scores = raw_scores.tolist()
-            if isinstance(raw_scores, (int, float)):
-                raw_scores = [raw_scores]
-            law_scores = [_sigmoid(float(score)) for score in raw_scores]
+            law_scores = normalize_sigmoid_scores(raw_scores)
         except Exception as exc:
             logger.warning("Law-level reranker scoring failed; falling back to lexical routing (%s)", exc)
             for candidate in candidates:
@@ -749,9 +745,10 @@ Kontekst fra lovtekster:
         # Score with cross-encoder
         try:
             raw_scores = self.reranker.predict(pairs)
-            # Convert to list if numpy array
             if hasattr(raw_scores, "tolist"):
                 raw_scores = raw_scores.tolist()
+            if isinstance(raw_scores, (int, float)):
+                raw_scores = [raw_scores]
             else:
                 raw_scores = list(raw_scores)
         except Exception as e:
@@ -769,7 +766,7 @@ Kontekst fra lovtekster:
         # Cross-encoders (including bge-reranker-v2-m3) output unbounded logits,
         # not probabilities. Sigmoid maps them to a consistent [0, 1] range
         # so the confidence threshold in settings is meaningful.
-        scores = [_sigmoid(s) for s in raw_scores]
+        scores = normalize_sigmoid_scores(raw_scores)
 
         # Sort by score (descending) and return top_k
         scored_docs = sorted(zip(docs, scores), key=lambda x: x[1], reverse=True)
@@ -878,6 +875,21 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
         lexical_top_k = self.settings.law_routing_max_candidates
         fallback_max_laws = self.settings.law_routing_fallback_max_laws
 
+        top_score = None
+        second_score = None
+        score_gap = None
+        score_mode = "lexical_only"
+        if scored_candidates:
+            top_score = scored_candidates[0].get("law_reranker_score")
+            second_score = (
+                scored_candidates[1].get("law_reranker_score")
+                if len(scored_candidates) > 1
+                else None
+            )
+            if top_score is not None and second_score is not None:
+                score_gap = top_score - second_score
+                score_mode = "reranker"
+
         def _is_uncertain(candidates: list[dict[str, Any]]) -> bool:
             if not candidates or not self.reranker:
                 return False
@@ -920,6 +932,25 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             routed = [candidate["law_id"] for candidate in scored_candidates[:lexical_top_k]]
             fallback_mode = None
 
+        uncertainty_triggered = bool(fallback_mode and fallback_mode.startswith("uncertainty"))
+        routing_confidence = {
+            "mode": score_mode,
+            "min_confidence": min_confidence,
+            "top_score": top_score,
+            "second_score": second_score,
+            "score_gap": score_gap,
+            "uncertainty_top_score_ceiling": self.settings.law_routing_uncertainty_top_score_ceiling,
+            "uncertainty_min_gap": self.settings.law_routing_uncertainty_min_gap,
+            "is_uncertain": uncertainty_triggered,
+            "selection_mode": (
+                "unfiltered_fallback"
+                if fallback_mode == "uncertainty_unfiltered"
+                else "broadened_fallback"
+                if fallback_mode == "uncertainty_broadened"
+                else "filtered"
+            ),
+            "selected_law_count": len(routed),
+        }
         self._last_routing_diagnostics = {
             "enabled": True,
             "query": query,
@@ -927,6 +958,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             "scored_candidates": scored_candidates[:10],
             "routed_law_ids": routed,
             "retrieval_fallback": fallback_mode,
+            "routing_confidence": routing_confidence,
         }
         logger.debug("Law routing candidates for '%s': %s", query, routed)
         return routed
@@ -1021,103 +1053,51 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             self._last_coherence_diagnostics.update({"reason": "single_law_only", "removed_count": 0})
             return docs, scores
 
-        max_weight = self.settings.law_coherence_max_score_weight
-        avg_weight = 1.0 - max_weight
-        law_stats: list[tuple[str, int, float, float, float]] = []
-        for law_id, indices in grouped_indices.items():
-            law_scores = [scores[idx] for idx in indices]
-            avg_score = sum(law_scores) / len(law_scores)
-            max_score = max(law_scores)
-            strength = (avg_weight * avg_score) + (max_weight * max_score)
-            law_stats.append((law_id, len(indices), avg_score, max_score, strength))
-        law_stats.sort(key=lambda item: (item[1], item[4], item[3], item[2]), reverse=True)
-
-        dominant_law_id, _dominant_count, dominant_avg_score, dominant_max_score, dominant_strength = law_stats[0]
-        min_law_count = self.settings.law_coherence_min_law_count
-        min_abs_gap = self.settings.law_coherence_score_gap
-        min_rel_gap = self.settings.law_coherence_relative_gap
-
-        drop_indices: set[int] = set()
-        decisions: list[dict[str, Any]] = []
-        for law_id, law_count, law_avg_score, law_max_score, law_strength in law_stats[1:]:
-            # Keep non-dominant laws that have enough support in top results.
-            if law_count >= min_law_count:
-                decisions.append(
-                    {
-                        "law_id": law_id,
-                        "law_count": law_count,
-                        "decision": "kept_min_count",
-                    }
-                )
-                continue
-            abs_gap = dominant_strength - law_strength
-            relative_gap = (abs_gap / dominant_strength) if dominant_strength > 0 else 0.0
-            if abs_gap < min_abs_gap and relative_gap < min_rel_gap:
-                decisions.append(
-                    {
-                        "law_id": law_id,
-                        "law_count": law_count,
-                        "decision": "kept_gap_too_small",
-                        "abs_gap": round(abs_gap, 6),
-                        "relative_gap": round(relative_gap, 6),
-                        "law_avg_score": round(law_avg_score, 6),
-                        "law_max_score": round(law_max_score, 6),
-                    }
-                )
-                continue
-            drop_indices.update(grouped_indices.get(law_id, []))
-            decisions.append(
+        candidates = []
+        for idx, doc in enumerate(docs):
+            metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+            candidates.append(
                 {
-                    "law_id": law_id,
-                    "law_count": law_count,
-                    "decision": "dropped",
-                    "abs_gap": round(abs_gap, 6),
-                    "relative_gap": round(relative_gap, 6),
-                    "law_avg_score": round(law_avg_score, 6),
-                    "law_max_score": round(law_max_score, 6),
+                    "index": idx,
+                    "law_id": (metadata.get("law_id") or "").strip(),
+                    "score": float(scores[idx]),
                 }
             )
+        decision = build_law_coherence_decision(candidates, self.settings)
+        drop_indices: set[int] = set(decision.get("drop_indices", set()))
 
         if not drop_indices:
             self._last_coherence_diagnostics.update(
                 {
-                    "reason": "no_laws_met_drop_criteria",
-                    "dominant_law_id": dominant_law_id,
-                    "dominant_avg_score": round(dominant_avg_score, 6),
-                    "dominant_max_score": round(dominant_max_score, 6),
-                    "dominant_strength": round(dominant_strength, 6),
-                    "decisions": decisions,
+                    "reason": decision.get("reason", "no_laws_met_drop_criteria"),
+                    "dominant_law_id": decision.get("dominant_law_id"),
+                    "dominant_avg_score": decision.get("dominant_avg_score"),
+                    "dominant_max_score": decision.get("dominant_max_score"),
+                    "dominant_strength": decision.get("dominant_strength"),
+                    "decisions": decision.get("decisions", []),
                     "removed_count": 0,
                 }
             )
             return docs, scores
 
-        min_sources_floor = min(max(self.settings.law_coherence_min_keep, 1), len(docs))
-        if (len(docs) - len(drop_indices)) < min_sources_floor:
-            # Keep only as many highest-score dropped indices as needed to satisfy the floor.
-            sorted_drop_indices = sorted(drop_indices, key=lambda idx: scores[idx], reverse=True)
-            required_keep = min_sources_floor - (len(docs) - len(drop_indices))
-            keep_back = set(sorted_drop_indices[:required_keep])
-            drop_indices = set(idx for idx in drop_indices if idx not in keep_back)
-
         filtered_docs = [doc for idx, doc in enumerate(docs) if idx not in drop_indices]
         filtered_scores = [score for idx, score in enumerate(scores) if idx not in drop_indices]
         self._last_coherence_diagnostics.update(
             {
-                "reason": "filtered",
-                "dominant_law_id": dominant_law_id,
-                "dominant_avg_score": round(dominant_avg_score, 6),
-                "dominant_max_score": round(dominant_max_score, 6),
-                "dominant_strength": round(dominant_strength, 6),
-                "min_sources_floor": min_sources_floor,
+                "reason": decision.get("reason", "filtered"),
+                "dominant_law_id": decision.get("dominant_law_id"),
+                "dominant_avg_score": decision.get("dominant_avg_score"),
+                "dominant_max_score": decision.get("dominant_max_score"),
+                "dominant_strength": decision.get("dominant_strength"),
+                "min_sources_floor": decision.get("min_sources_floor"),
                 "removed_count": len(drop_indices),
-                "decisions": decisions,
+                "decisions": decision.get("decisions", []),
             }
         )
         logger.debug(
             "Law coherence filter removed %s docs from non-dominant laws (dominant_law=%s)",
             len(drop_indices),
-            dominant_law_id,
+            decision.get("dominant_law_id"),
         )
         return filtered_docs, filtered_scores
 

@@ -1,0 +1,47 @@
+{
+  "baseline_id": "production_trust_baseline_v1",
+  "profile_version": "2026-02-16",
+  "description": "Must-pass trust gates for production hardening. Values are conservative floors/ceilings anchored to current validated Colab runs.",
+  "gates": [
+    {
+      "metric": "contamination.aggregate.route_miss_expected_law_rate",
+      "operator": "<=",
+      "value": 0.05
+    },
+    {
+      "metric": "contamination.aggregate.dominant_law_mismatch_rate",
+      "operator": "<=",
+      "value": 0.30
+    },
+    {
+      "metric": "contamination.aggregate.contamination_rate",
+      "operator": "<=",
+      "value": 0.50
+    },
+    {
+      "metric": "contamination.aggregate.unexpected_citation_rate",
+      "operator": "<=",
+      "value": 0.80
+    },
+    {
+      "metric": "sweep.top.recall_at_k",
+      "operator": ">=",
+      "value": 0.75
+    },
+    {
+      "metric": "sweep.top.citation_precision",
+      "operator": ">=",
+      "value": 0.30
+    },
+    {
+      "metric": "sweep.top.false_positive_gating_rate",
+      "operator": "<=",
+      "value": 0.25
+    },
+    {
+      "metric": "sweep.top.law_contamination_rate",
+      "operator": "<=",
+      "value": 0.50
+    }
+  ]
+}

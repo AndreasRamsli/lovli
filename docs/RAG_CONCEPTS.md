@@ -34,10 +34,14 @@ Before any retrieval, the LLM analyzes the user's question:
 - **Entity extraction**: Detect explicit law/section references, legal domains, and key concepts.
 - **Follow-up rewriting**: If this is a follow-up in a conversation, rewrite it to be self-contained (e.g., "What's the deadline for that?" -> "What's the deadline for rent increases under husleieloven?").
 
-### Stage 2: Law Routing (In Progress)
-For questions where the relevant law isn't obvious, the system consults a **law catalog** — a compact summary of all 735 Norwegian laws — to identify 1-3 candidate laws. This is a single LLM call against a structured index, not a vector search. [DONE: Catalog generation implemented]
+### Stage 2: Law Routing (Implemented, Optional)
+For questions where the relevant law isn't obvious, the system can route retrieval through a lightweight law-catalog stage:
 
-For questions with obvious routing (user mentioned "husleie", or asked about a specific section), this stage is skipped.
+- **Lexical prefilter**: token overlap and direct law-name mention checks over catalog entries.
+- **Law-level reranking**: optional cross-encoder scoring of routed law candidates.
+- **Uncertainty fallback**: when top law scores are weak/close, routing can fall back to unfiltered retrieval (or broadened candidate laws).
+
+This stage is configurable (`LAW_ROUTING_ENABLED`) and defaults to safe fallback behavior to avoid over-filtering.
 
 ### Stage 3: Hybrid Search (Implemented)
 Search the article-level index using both:
@@ -53,21 +57,24 @@ A **cross-encoder reranker** (bge-reranker-v2-m3) rescores all 15 candidates by 
 
 The top 5 after reranking go to generation.
 
-### Stage 5: Editorial-Note Prioritization (Implemented)
-Legal corpora include both substantive provisions and editorial change notes (e.g., amendment history lines). Lovli now treats these as different document types:
+### Stage 5: Editorial-Note Attachment (Implemented)
+Legal corpora include both substantive provisions and editorial change notes (e.g., amendment history lines). Lovli treats these as different document types:
 
 - **`provision`**: primary legal basis used first in context.
-- **`editorial_note`**: supplemental context, included with an adaptive budget.
+- **`editorial_note`**: supplemental context attached to provisions.
 
-The editorial budget is controlled by config and can expand for history-intent queries (e.g., "når ble denne endret?"), while preserving deterministic ordering (provisions first, then editorial notes by score).
+Instead of returning editorial notes as separate ranked sources, runtime keeps provision documents primary and attaches normalized editorial-note payloads per provision. Attachment is deterministic (dedupe + caps) and can use a compatibility fallback path for older indexes.
 
-### Stage 6: Cross-Reference Expansion (Planned)
+### Stage 6: Law Coherence Filtering (Implemented)
+After reranking, Lovli can suppress low-confidence singleton sources from non-dominant laws when score gaps indicate likely cross-law contamination. A minimum keep floor ensures the context is never emptied by the filter.
+
+### Stage 7: Cross-Reference Expansion (Planned)
 Norwegian law sections frequently reference other sections (e.g., "jf. § 9-10"). If the top results contain cross-references, the system fetches those referenced articles as additional context. [DONE: Cross-reference parsing implemented]
 
-### Stage 7: Answer Generation (Implemented)
+### Stage 8: Answer Generation (Implemented)
 The LLM generates an answer using the retrieved context with:
 - **Inline citations**: Every claim references a specific section (e.g., "husleieloven § 3-5").
-- **Confidence gating**: If retrieval scores are low, the system says "I couldn't find a clear answer" rather than guessing.
+- **Confidence + ambiguity gating**: If top retrieval is weak (or top scores are too close in ambiguous cases), the system asks for a clearer question rather than guessing.
 - **Conversation memory**: Chat history is included so the LLM can maintain coherent multi-turn conversations.
 
 ## Three-Tier Indexing
@@ -101,7 +108,7 @@ Each pipeline stage is evaluated independently via LangSmith:
 - **Retrieval recall**: Are the correct articles in the top-k?
 - **Reranker precision**: Does reranking improve ordering?
 - **Answer quality**: Is the final answer correct, grounded, and well-cited?
-- **Editorial-context behavior**: Are editorial notes included when expected, while provisions remain primary?
+- **Editorial-context behavior**: Are editorial notes attached when expected, while provisions remain primary?
 
 This per-stage measurement lets us identify exactly where failures occur and fix the right component.
 
