@@ -101,6 +101,30 @@ def _has_attached_editorial(provision_rows: list[dict]) -> bool:
     return False
 
 
+def _compute_balanced_score(metrics: dict) -> float:
+    """
+    Composite score balancing positive accuracy and negative guardrails.
+
+    Weights prioritize answer quality while still penalizing contamination/noise.
+    """
+    accuracy_component = (
+        (0.30 * metrics.get("recall_at_k", 0.0))
+        + (0.20 * metrics.get("mean_expected_coverage", 0.0))
+        + (0.15 * metrics.get("citation_precision", 0.0))
+    )
+    abstention_component = (
+        (0.20 * metrics.get("negative_success", 0.0))
+        + (0.10 * metrics.get("negative_offtopic_legal_success", 0.0))
+        + (0.05 * metrics.get("negative_offtopic_nonlegal_success", 0.0))
+    )
+    penalties = (
+        (0.08 * metrics.get("law_contamination_rate", 0.0))
+        + (0.07 * metrics.get("unexpected_citation_rate", 0.0))
+        + (0.10 * metrics.get("false_positive_gating_rate", 0.0))
+    )
+    return accuracy_component + abstention_component - penalties
+
+
 def _apply_law_coherence_filter_candidates(candidates: list[dict], settings) -> tuple[list[dict], int]:
     """Apply runtime-equivalent law coherence filtering on scored candidate dicts."""
     if not candidates or len(candidates) < 2:
@@ -115,31 +139,42 @@ def _apply_law_coherence_filter_candidates(candidates: list[dict], settings) -> 
     if len(grouped) <= 1:
         return candidates, 0
 
-    law_stats: list[tuple[str, int, float, float]] = []
+    max_weight = settings.law_coherence_max_score_weight
+    avg_weight = 1.0 - max_weight
+    law_stats: list[tuple[str, int, float, float, float]] = []
     for law_id, indexed_items in grouped.items():
         law_scores = [float(item.get("score", 0.0)) for _idx, item in indexed_items]
         avg_score = sum(law_scores) / len(law_scores) if law_scores else 0.0
         max_score = max(law_scores) if law_scores else 0.0
-        law_stats.append((law_id, len(indexed_items), avg_score, max_score))
-    law_stats.sort(key=lambda item: (item[1], item[2], item[3]), reverse=True)
+        strength = (avg_weight * avg_score) + (max_weight * max_score)
+        law_stats.append((law_id, len(indexed_items), avg_score, max_score, strength))
+    law_stats.sort(key=lambda item: (item[1], item[4], item[3], item[2]), reverse=True)
 
-    dominant_law_id, _dominant_count, dominant_avg_score, _dominant_max_score = law_stats[0]
+    dominant_law_id, _dominant_count, _dominant_avg_score, _dominant_max_score, dominant_strength = law_stats[0]
     _ = dominant_law_id  # Keep variable for readability symmetry with runtime method.
 
     drop_indices: set[int] = set()
-    for law_id, law_count, law_avg_score, _law_max_score in law_stats[1:]:
+    for law_id, law_count, _law_avg_score, _law_max_score, law_strength in law_stats[1:]:
         if law_count >= settings.law_coherence_min_law_count:
             continue
-        if (dominant_avg_score - law_avg_score) < settings.law_coherence_score_gap:
+        abs_gap = dominant_strength - law_strength
+        relative_gap = (abs_gap / dominant_strength) if dominant_strength > 0 else 0.0
+        if (
+            abs_gap < settings.law_coherence_score_gap
+            and relative_gap < settings.law_coherence_relative_gap
+        ):
             continue
         drop_indices.update(idx for idx, _item in grouped.get(law_id, []))
 
     if not drop_indices:
         return candidates, 0
 
-    min_sources_floor = min(settings.reranker_min_sources, len(candidates))
+    min_sources_floor = min(max(settings.law_coherence_min_keep, 1), len(candidates))
     if (len(candidates) - len(drop_indices)) < min_sources_floor:
-        return candidates, 0
+        sorted_drop_indices = sorted(drop_indices, key=lambda idx: candidates[idx].get("score", 0.0), reverse=True)
+        required_keep = min_sources_floor - (len(candidates) - len(drop_indices))
+        keep_back = set(sorted_drop_indices[:required_keep])
+        drop_indices = set(idx for idx in drop_indices if idx not in keep_back)
 
     filtered = [item for idx, item in enumerate(candidates) if idx not in drop_indices]
     return filtered, len(drop_indices)
@@ -243,6 +278,10 @@ def evaluate_combo(
     law_contamination_total = 0
     law_contamination_cases = 0
     law_coherence_filtered_count = 0
+    false_positive_gating_count = 0
+    positive_total = 0
+    weighted_positive_recall_numerator = 0.0
+    weighted_positive_recall_denominator = 0.0
     top_scores: list[float] = []
     final_k = chain.settings.retrieval_k
     min_sources = chain.settings.reranker_min_sources
@@ -308,6 +347,7 @@ def evaluate_combo(
 
         if expected:
             retrieval_total += 1
+            positive_total += 1
             if expected_sources:
                 matched_expected_pairs = set()
                 matched_citations = 0
@@ -350,6 +390,9 @@ def evaluate_combo(
 
             if matched:
                 retrieval_hits += 1
+            # Coverage-weighted positive recall is less binary than recall_at_k.
+            weighted_positive_recall_numerator += coverage
+            weighted_positive_recall_denominator += 1.0
             expected_coverage_total += coverage
             expected_coverage_count += 1
             citation_precision_total += precision
@@ -396,6 +439,21 @@ def evaluate_combo(
                 core_segment["negative"]["total"] += 1
                 if segment_key in core_segment:
                     core_segment[segment_key]["total"] += 1
+
+        if expected:
+            is_gated = False
+            if top_score is not None and top_score < confidence_threshold:
+                is_gated = True
+            if (
+                not is_gated
+                and chain.settings.reranker_ambiguity_gating_enabled
+                and len(scores) >= 2
+                and scores[0] <= top_score_ceiling
+                and (scores[0] - scores[1]) < ambiguity_min_gap
+            ):
+                is_gated = True
+            if is_gated:
+                false_positive_gating_count += 1
 
         if expects_editorial_context:
             editorial_expected_total += 1
@@ -517,8 +575,16 @@ def evaluate_combo(
         if law_contamination_total
         else 0.0
     )
+    false_positive_gating_rate = (
+        false_positive_gating_count / positive_total if positive_total else 0.0
+    )
+    coverage_weighted_positive_recall = (
+        weighted_positive_recall_numerator / weighted_positive_recall_denominator
+        if weighted_positive_recall_denominator
+        else 0.0
+    )
 
-    return {
+    metrics = {
         "recall_at_k": recall_at_k,
         "ambiguity_success": ambiguity_success,
         "avg_top_score": avg_top_score,
@@ -539,11 +605,15 @@ def evaluate_combo(
         "unexpected_citation_rate": unexpected_citation_rate,
         "law_contamination_rate": law_contamination_rate,
         "law_coherence_filtered_count": law_coherence_filtered_count,
+        "false_positive_gating_rate": false_positive_gating_rate,
+        "coverage_weighted_positive_recall": coverage_weighted_positive_recall,
         "editorial_context_success": editorial_context_success,
         "core_editorial_context_success": core_editorial_context_success,
         "non_editorial_clean_success": non_editorial_clean_success,
         "core_non_editorial_clean_success": core_non_editorial_clean_success,
     }
+    metrics["balanced_score"] = _compute_balanced_score(metrics)
+    return metrics
 
 
 def apply_combo_to_chain(
@@ -632,8 +702,9 @@ def main() -> None:
         rows.append(row)
         logger.info(
             "k_init=%s k=%s conf=%.2f min_doc=%.2f min_gap=%.2f top_ceiling=%.2f -> "
-            "recall=%.3f coverage=%.3f precision=%.3f unexpected=%.3f "
+            "balanced=%.3f recall=%.3f coverage=%.3f precision=%.3f unexpected=%.3f "
             "law_contam=%.3f coherence_dropped=%s "
+            "fp_gate=%.3f cw_recall=%.3f "
             "single=%.3f multi=%.3f neg=%.3f neg_legal=%.3f neg_nonlegal=%.3f "
             "editorial=%.3f non_editorial_clean=%.3f avg_top=%.3f",
             retrieval_k_initial,
@@ -642,12 +713,15 @@ def main() -> None:
             min_doc,
             min_gap,
             top_score_ceiling,
+            metrics["balanced_score"],
             metrics["recall_at_k"],
             metrics["mean_expected_coverage"],
             metrics["citation_precision"],
             metrics["unexpected_citation_rate"],
             metrics["law_contamination_rate"],
             metrics["law_coherence_filtered_count"],
+            metrics["false_positive_gating_rate"],
+            metrics["coverage_weighted_positive_recall"],
             metrics["single_article_recall_at_k"],
             metrics["multi_article_recall_at_k"],
             metrics["negative_success"],
@@ -658,18 +732,17 @@ def main() -> None:
             metrics["avg_top_score"],
         )
 
-    # Sort by leakage-first objective, then coverage/recall.
+    # Sort by balanced objective first, then tie-breakers.
     rows.sort(
         key=lambda r: (
-            r["negative_offtopic_nonlegal_success"],
-            r["negative_offtopic_legal_success"],
-            r["negative_ambiguity_success"],
-            r["non_editorial_clean_success"],
-            -r["law_contamination_rate"],
+            r["balanced_score"],
+            r["coverage_weighted_positive_recall"],
             r["recall_at_k"],
-            r["mean_expected_coverage"],
             r["citation_precision"],
+            -r["law_contamination_rate"],
+            -r["false_positive_gating_rate"],
             -r["unexpected_citation_rate"],
+            r["negative_success"],
         ),
         reverse=True,
     )

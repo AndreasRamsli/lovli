@@ -155,6 +155,24 @@ class Settings(BaseSettings):
         le=10,
         description="Maximum number of candidate laws to route to before retrieval.",
     )
+    law_routing_prefilter_k: int = Field(
+        default=20,
+        ge=3,
+        le=200,
+        description="Maximum lexical routing candidates to score in the hybrid law routing prefilter.",
+    )
+    law_routing_rerank_top_k: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        description="Number of top laws to keep after law-level reranker scoring.",
+    )
+    law_routing_min_confidence: float = Field(
+        default=0.40,
+        ge=0.0,
+        le=1.0,
+        description="Minimum sigmoid-normalized law reranker score required for routed law candidates.",
+    )
     law_routing_min_token_overlap: int = Field(
         default=1,
         ge=1,
@@ -176,6 +194,24 @@ class Settings(BaseSettings):
         ge=0.0,
         le=1.0,
         description="Minimum average score gap (dominant law - foreign law) required before removing foreign-law singleton sources.",
+    )
+    law_coherence_relative_gap: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+        description="Minimum relative gap between dominant and foreign law strength before filtering non-dominant laws.",
+    )
+    law_coherence_max_score_weight: float = Field(
+        default=0.60,
+        ge=0.0,
+        le=1.0,
+        description="Weight on max score when computing law strength for coherence filtering (remaining weight goes to average score).",
+    )
+    law_coherence_min_keep: int = Field(
+        default=1,
+        ge=1,
+        le=10,
+        description="Minimum number of sources to keep after coherence filtering.",
     )
 
     # Indexing Configuration

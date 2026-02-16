@@ -52,6 +52,14 @@ def _tokenize_for_routing(text: str) -> set[str]:
     return set(_ROUTING_TOKEN_RE.findall((text or "").lower()))
 
 
+def _normalize_law_mention(text: str) -> str:
+    """Normalize text for robust law short-name mention checks."""
+    normalized = (text or "").lower()
+    normalized = re.sub(r"[^a-z0-9]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
 def _infer_doc_type(metadata: Dict[str, Any]) -> str:
     """Infer doc type with backward-compatible fallbacks for legacy payloads."""
     doc_type = (metadata.get("doc_type") or "").strip().lower()
@@ -236,9 +244,13 @@ Kontekst fra lovtekster:
 
         # Optional Tier-0 law catalog for lightweight routing before retrieval.
         self._law_catalog: list[dict[str, Any]] = []
+        self._law_catalog_entries: list[dict[str, Any]] = []
+        self._last_routing_diagnostics: dict[str, Any] = {}
+        self._last_coherence_diagnostics: dict[str, Any] = {}
         if self.settings.law_routing_enabled:
             try:
                 self._law_catalog = load_catalog(Path(self.settings.law_catalog_path))
+                self._law_catalog_entries = self._build_routing_entries(self._law_catalog)
                 logger.info(
                     "Loaded law catalog for routing: %s entries from %s",
                     len(self._law_catalog),
@@ -250,6 +262,112 @@ Kontekst fra lovtekster:
                     "Falling back to unfiltered retrieval.",
                     e,
                 )
+
+    def _build_routing_entries(self, catalog: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Precompute routing text/tokens for fast hybrid law routing."""
+        entries: list[dict[str, Any]] = []
+        for item in catalog:
+            law_id = (item.get("law_id") or "").strip()
+            if not law_id:
+                continue
+            title = (item.get("law_title") or "").strip()
+            short_name = (item.get("law_short_name") or "").strip()
+            summary = (item.get("summary") or "").strip()
+            law_ref = (item.get("law_ref") or "").strip()
+            routing_text = " ".join(part for part in [title, short_name, summary, law_ref] if part)
+            entries.append(
+                {
+                    "law_id": law_id,
+                    "law_title": title,
+                    "law_short_name": short_name,
+                    "routing_text": routing_text,
+                    "routing_tokens": _tokenize_for_routing(routing_text),
+                    "short_name_normalized": _normalize_law_mention(short_name),
+                }
+            )
+        return entries
+
+    def _score_law_candidates_lexical(self, query: str) -> list[dict[str, Any]]:
+        """Score catalog entries lexically before optional reranker-based law scoring."""
+        query_tokens = _tokenize_for_routing(query)
+        if not query_tokens:
+            return []
+        query_norm = _normalize_law_mention(query)
+
+        scored: list[dict[str, Any]] = []
+        for entry in self._law_catalog_entries:
+            overlap = len(query_tokens & entry["routing_tokens"])
+            short_name = entry.get("short_name_normalized") or ""
+
+            direct_mention = False
+            if short_name and short_name in query_norm:
+                direct_mention = True
+                overlap += 5
+
+            if overlap < self.settings.law_routing_min_token_overlap:
+                continue
+
+            scored.append(
+                {
+                    "law_id": entry["law_id"],
+                    "law_title": entry.get("law_title", ""),
+                    "law_short_name": entry.get("law_short_name", ""),
+                    "routing_text": entry.get("routing_text", ""),
+                    "lexical_score": overlap,
+                    "direct_mention": direct_mention,
+                }
+            )
+
+        scored.sort(
+            key=lambda item: (item["direct_mention"], item["lexical_score"]),
+            reverse=True,
+        )
+        return scored[: self.settings.law_routing_prefilter_k]
+
+    def _score_law_candidates_reranker(
+        self, query: str, candidates: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Apply law-level reranker scoring to lexical candidates."""
+        if not candidates:
+            return candidates
+        if not self.reranker:
+            for candidate in candidates:
+                candidate["law_reranker_score"] = None
+            return candidates
+
+        pairs = [
+            [query, candidate.get("routing_text", "") or candidate.get("law_title", "")]
+            for candidate in candidates
+        ]
+        try:
+            raw_scores = self.reranker.predict(pairs)
+            if hasattr(raw_scores, "tolist"):
+                raw_scores = raw_scores.tolist()
+            if isinstance(raw_scores, (int, float)):
+                raw_scores = [raw_scores]
+            law_scores = [_sigmoid(float(score)) for score in raw_scores]
+        except Exception as exc:
+            logger.warning("Law-level reranker scoring failed; falling back to lexical routing (%s)", exc)
+            for candidate in candidates:
+                candidate["law_reranker_score"] = None
+            return candidates
+
+        reranked = []
+        for candidate, score in zip(candidates, law_scores):
+            item = dict(candidate)
+            item["law_reranker_score"] = score
+            reranked.append(item)
+
+        # Direct law mentions are trusted strongly: keep them high.
+        reranked.sort(
+            key=lambda item: (
+                item.get("direct_mention", False),
+                item.get("law_reranker_score", 0.0),
+                item.get("lexical_score", 0),
+            ),
+            reverse=True,
+        )
+        return reranked
 
     def _validate_question(self, question: str) -> str:
         """Validate and normalize question input."""
@@ -711,42 +829,48 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
         return question
 
     def _route_law_ids(self, query: str) -> list[str]:
-        """Route query to likely law IDs using simple lexical overlap over catalog metadata."""
-        if not self.settings.law_routing_enabled or not self._law_catalog:
+        """Route query to likely laws using hybrid lexical + law-level reranker scoring."""
+        if not self.settings.law_routing_enabled or not self._law_catalog_entries:
+            self._last_routing_diagnostics = {
+                "enabled": bool(self.settings.law_routing_enabled),
+                "reason": "routing_disabled_or_empty_catalog",
+                "routed_law_ids": [],
+            }
+            return []
+        lexical_candidates = self._score_law_candidates_lexical(query)
+        if not lexical_candidates:
+            self._last_routing_diagnostics = {
+                "enabled": True,
+                "reason": "no_lexical_candidates",
+                "routed_law_ids": [],
+            }
             return []
 
-        query_lower = query.lower()
-        query_tokens = _tokenize_for_routing(query)
-        if not query_tokens:
-            return []
+        scored_candidates = self._score_law_candidates_reranker(query, lexical_candidates)
 
-        scored: list[tuple[str, int]] = []
-        for entry in self._law_catalog:
-            law_id = entry.get("law_id")
-            if not law_id:
-                continue
+        min_confidence = self.settings.law_routing_min_confidence
+        rerank_top_k = self.settings.law_routing_rerank_top_k
+        lexical_top_k = self.settings.law_routing_max_candidates
+        if self.reranker:
+            selected = [
+                candidate
+                for candidate in scored_candidates
+                if candidate.get("direct_mention")
+                or (candidate.get("law_reranker_score") is not None and candidate.get("law_reranker_score", 0.0) >= min_confidence)
+            ]
+            if not selected:
+                selected = scored_candidates[:lexical_top_k]
+            routed = [candidate["law_id"] for candidate in selected[:rerank_top_k]]
+        else:
+            routed = [candidate["law_id"] for candidate in scored_candidates[:lexical_top_k]]
 
-            title = entry.get("law_title", "")
-            short_name = entry.get("law_short_name", "") or ""
-            summary = entry.get("summary", "") or ""
-            law_ref = entry.get("law_ref", "") or ""
-            catalog_text = f"{title} {short_name} {summary} {law_ref}"
-            catalog_tokens = _tokenize_for_routing(catalog_text)
-            overlap = len(query_tokens & catalog_tokens)
-
-            # Bonus for direct short-name mention, e.g. "husleieloven".
-            if short_name and short_name.lower() in query_lower:
-                overlap += 3
-
-            if overlap >= self.settings.law_routing_min_token_overlap:
-                scored.append((law_id, overlap))
-
-        if not scored:
-            return []
-
-        scored.sort(key=lambda x: x[1], reverse=True)
-        max_candidates = self.settings.law_routing_max_candidates
-        routed = [law_id for law_id, _ in scored[:max_candidates]]
+        self._last_routing_diagnostics = {
+            "enabled": True,
+            "query": query,
+            "lexical_candidates": lexical_candidates[:10],
+            "scored_candidates": scored_candidates[:10],
+            "routed_law_ids": routed,
+        }
         logger.debug("Law routing candidates for '%s': %s", query, routed)
         return routed
 
@@ -766,6 +890,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
 
     def _invoke_retriever(self, query: str, routed_law_ids: list[str] | None = None):
         """Invoke retriever with optional law_id filter; fallback to unfiltered on errors."""
+        self._last_routing_diagnostics.setdefault("retrieval_fallback", None)
         if not routed_law_ids:
             return self.retriever.invoke(query)
 
@@ -780,8 +905,10 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             docs = filtered_retriever.invoke(query)
             if docs:
                 return docs
+            self._last_routing_diagnostics["retrieval_fallback"] = "empty_filtered_results"
         except Exception as e:
             logger.warning("Filtered retrieval failed (%s); using unfiltered retrieval.", e)
+            self._last_routing_diagnostics["retrieval_fallback"] = f"filtered_retrieval_error:{e}"
 
         return self.retriever.invoke(query)
 
@@ -819,9 +946,12 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
         Keeps the dominant law and removes non-dominant laws that have too few
         sources when they are clearly lower-scoring than the dominant law.
         """
+        self._last_coherence_diagnostics = {"enabled": bool(self.settings.law_coherence_filter_enabled)}
         if not docs or not scores or len(docs) != len(scores):
+            self._last_coherence_diagnostics.update({"reason": "missing_docs_or_scores", "removed_count": 0})
             return docs, scores
         if len(docs) < 2:
+            self._last_coherence_diagnostics.update({"reason": "insufficient_docs", "removed_count": 0})
             return docs, scores
 
         grouped_indices: dict[str, list[int]] = {}
@@ -831,45 +961,102 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             grouped_indices.setdefault(law_id, []).append(idx)
 
         if len(grouped_indices) <= 1:
+            self._last_coherence_diagnostics.update({"reason": "single_law_only", "removed_count": 0})
             return docs, scores
 
-        law_stats: list[tuple[str, int, float, float]] = []
+        max_weight = self.settings.law_coherence_max_score_weight
+        avg_weight = 1.0 - max_weight
+        law_stats: list[tuple[str, int, float, float, float]] = []
         for law_id, indices in grouped_indices.items():
             law_scores = [scores[idx] for idx in indices]
             avg_score = sum(law_scores) / len(law_scores)
             max_score = max(law_scores)
-            law_stats.append((law_id, len(indices), avg_score, max_score))
-        law_stats.sort(key=lambda item: (item[1], item[2], item[3]), reverse=True)
+            strength = (avg_weight * avg_score) + (max_weight * max_score)
+            law_stats.append((law_id, len(indices), avg_score, max_score, strength))
+        law_stats.sort(key=lambda item: (item[1], item[4], item[3], item[2]), reverse=True)
 
-        dominant_law_id, _dominant_count, dominant_avg_score, _dominant_max_score = law_stats[0]
+        dominant_law_id, _dominant_count, dominant_avg_score, dominant_max_score, dominant_strength = law_stats[0]
         min_law_count = self.settings.law_coherence_min_law_count
-        min_gap = self.settings.law_coherence_score_gap
+        min_abs_gap = self.settings.law_coherence_score_gap
+        min_rel_gap = self.settings.law_coherence_relative_gap
 
         drop_indices: set[int] = set()
-        for law_id, law_count, law_avg_score, _law_max_score in law_stats[1:]:
+        decisions: list[dict[str, Any]] = []
+        for law_id, law_count, law_avg_score, law_max_score, law_strength in law_stats[1:]:
             # Keep non-dominant laws that have enough support in top results.
             if law_count >= min_law_count:
+                decisions.append(
+                    {
+                        "law_id": law_id,
+                        "law_count": law_count,
+                        "decision": "kept_min_count",
+                    }
+                )
                 continue
-            score_gap = dominant_avg_score - law_avg_score
-            if score_gap < min_gap:
+            abs_gap = dominant_strength - law_strength
+            relative_gap = (abs_gap / dominant_strength) if dominant_strength > 0 else 0.0
+            if abs_gap < min_abs_gap and relative_gap < min_rel_gap:
+                decisions.append(
+                    {
+                        "law_id": law_id,
+                        "law_count": law_count,
+                        "decision": "kept_gap_too_small",
+                        "abs_gap": round(abs_gap, 6),
+                        "relative_gap": round(relative_gap, 6),
+                        "law_avg_score": round(law_avg_score, 6),
+                        "law_max_score": round(law_max_score, 6),
+                    }
+                )
                 continue
             drop_indices.update(grouped_indices.get(law_id, []))
+            decisions.append(
+                {
+                    "law_id": law_id,
+                    "law_count": law_count,
+                    "decision": "dropped",
+                    "abs_gap": round(abs_gap, 6),
+                    "relative_gap": round(relative_gap, 6),
+                    "law_avg_score": round(law_avg_score, 6),
+                    "law_max_score": round(law_max_score, 6),
+                }
+            )
 
         if not drop_indices:
-            return docs, scores
-
-        min_sources_floor = min(self.settings.reranker_min_sources, len(docs))
-        if (len(docs) - len(drop_indices)) < min_sources_floor:
-            logger.debug(
-                "Skipping law coherence filter to preserve minimum sources floor "
-                "(would keep %s < min_sources_floor=%s)",
-                len(docs) - len(drop_indices),
-                min_sources_floor,
+            self._last_coherence_diagnostics.update(
+                {
+                    "reason": "no_laws_met_drop_criteria",
+                    "dominant_law_id": dominant_law_id,
+                    "dominant_avg_score": round(dominant_avg_score, 6),
+                    "dominant_max_score": round(dominant_max_score, 6),
+                    "dominant_strength": round(dominant_strength, 6),
+                    "decisions": decisions,
+                    "removed_count": 0,
+                }
             )
             return docs, scores
 
+        min_sources_floor = min(max(self.settings.law_coherence_min_keep, 1), len(docs))
+        if (len(docs) - len(drop_indices)) < min_sources_floor:
+            # Keep only as many highest-score dropped indices as needed to satisfy the floor.
+            sorted_drop_indices = sorted(drop_indices, key=lambda idx: scores[idx], reverse=True)
+            required_keep = min_sources_floor - (len(docs) - len(drop_indices))
+            keep_back = set(sorted_drop_indices[:required_keep])
+            drop_indices = set(idx for idx in drop_indices if idx not in keep_back)
+
         filtered_docs = [doc for idx, doc in enumerate(docs) if idx not in drop_indices]
         filtered_scores = [score for idx, score in enumerate(scores) if idx not in drop_indices]
+        self._last_coherence_diagnostics.update(
+            {
+                "reason": "filtered",
+                "dominant_law_id": dominant_law_id,
+                "dominant_avg_score": round(dominant_avg_score, 6),
+                "dominant_max_score": round(dominant_max_score, 6),
+                "dominant_strength": round(dominant_strength, 6),
+                "min_sources_floor": min_sources_floor,
+                "removed_count": len(drop_indices),
+                "decisions": decisions,
+            }
+        )
         logger.debug(
             "Law coherence filter removed %s docs from non-dominant laws (dominant_law=%s)",
             len(drop_indices),

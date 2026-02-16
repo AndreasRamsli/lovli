@@ -60,7 +60,10 @@ def analyze_question(chain: LegalRAGChain, row: dict[str, Any], retrieval_k_init
     expected_sources = row.get("expected_sources", []) or []
     expected_articles = row.get("expected_articles", []) or []
 
-    docs = chain._invoke_retriever(question, routed_law_ids=chain._route_law_ids(question))
+    routed_law_ids = chain._route_law_ids(question)
+    routing_diagnostics = dict(getattr(chain, "_last_routing_diagnostics", {}) or {})
+    docs = chain._invoke_retriever(question, routed_law_ids=routed_law_ids)
+    routing_diagnostics = dict(getattr(chain, "_last_routing_diagnostics", routing_diagnostics) or routing_diagnostics)
 
     # Deduplicate by (law_id, article_id) the same way as runtime retrieve().
     dedup_docs = []
@@ -78,6 +81,9 @@ def analyze_question(chain: LegalRAGChain, row: dict[str, Any], retrieval_k_init
     # Apply reranking + doc score floor to match retrieval behavior.
     reranked_docs, scores = chain._rerank(question, docs, top_k=chain.settings.retrieval_k)
     reranked_docs, scores = chain._apply_reranker_doc_filter(reranked_docs, scores)
+    if chain.settings.law_coherence_filter_enabled:
+        reranked_docs, scores = chain._filter_by_law_coherence(reranked_docs, scores)
+    coherence_diagnostics = dict(getattr(chain, "_last_coherence_diagnostics", {}) or {})
 
     # Keep provision docs only in diagnostics.
     provision_rows: list[dict[str, Any]] = []
@@ -152,6 +158,9 @@ def analyze_question(chain: LegalRAGChain, row: dict[str, Any], retrieval_k_init
         "avg_foreign_score_gap": mean(foreign_score_gaps) if foreign_score_gaps else None,
         "matched_expected_source_count": matched_expected_pairs,
         "unexpected_sources_count": len(unexpected_sources),
+        "routed_law_ids": routed_law_ids,
+        "routing_diagnostics": routing_diagnostics,
+        "coherence_diagnostics": coherence_diagnostics,
         "law_stats": law_stats,
         "unexpected_sources": unexpected_sources,
     }
@@ -177,6 +186,16 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         "unexpected_citation_rate": (unexpected_total / cited_total) if cited_total else 0.0,
         "total_unexpected_sources": unexpected_total,
         "total_cited_sources": cited_total,
+        "routing_fallback_count": sum(
+            1
+            for r in results
+            if ((r.get("routing_diagnostics") or {}).get("retrieval_fallback") is not None)
+        ),
+        "coherence_filtered_query_count": sum(
+            1
+            for r in results
+            if (((r.get("coherence_diagnostics") or {}).get("removed_count") or 0) > 0)
+        ),
     }
 
 
