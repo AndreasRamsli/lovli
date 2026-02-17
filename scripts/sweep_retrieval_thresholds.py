@@ -157,6 +157,14 @@ def _is_profile_default_row(row: dict, profile_defaults: dict) -> bool:
     return True
 
 
+def _with_default_value(base_values: list, default_value):
+    """Return sorted unique values ensuring profile default is present."""
+    merged = list(base_values)
+    if default_value not in merged:
+        merged.append(default_value)
+    return sorted(set(merged))
+
+
 def _apply_law_coherence_filter_candidates(
     candidates: list[dict],
     settings,
@@ -824,17 +832,39 @@ def main() -> None:
         "law_rank_fusion_enabled": settings.law_rank_fusion_enabled,
     }
 
-    retrieval_k_initial_values = [15, 20]
-    retrieval_k_values = [3, 5]
-    confidence_values = [0.30, 0.35, 0.45, 0.55]
-    min_doc_values = [0.25, 0.35, 0.45, 0.55]
-    min_gap_values = [0.05, 0.10]
-    top_score_ceiling_values = [0.60, 0.70]
+    retrieval_k_initial_values = _with_default_value([15, 20], int(settings.retrieval_k_initial))
+    retrieval_k_values = _with_default_value([3, 5], int(settings.retrieval_k))
+    confidence_values = _with_default_value(
+        [0.30, 0.35, 0.45, 0.55],
+        float(settings.reranker_confidence_threshold),
+    )
+    min_doc_values = _with_default_value(
+        [0.25, 0.35, 0.45, 0.55],
+        float(settings.reranker_min_doc_score),
+    )
+    min_gap_values = _with_default_value([0.05, 0.10], float(settings.reranker_ambiguity_min_gap))
+    top_score_ceiling_values = _with_default_value(
+        [0.60, 0.70],
+        float(settings.reranker_ambiguity_top_score_ceiling),
+    )
     routing_fallback_unfiltered_values = [True, False]
+    if bool(settings.law_routing_fallback_unfiltered) not in routing_fallback_unfiltered_values:
+        routing_fallback_unfiltered_values.append(bool(settings.law_routing_fallback_unfiltered))
+    routing_fallback_unfiltered_values = sorted(set(routing_fallback_unfiltered_values), reverse=True)
 
     logger.info("Loaded %s questions", len(questions))
     core_count = sum(1 for row in questions if row.get("id") in CORE_QUESTION_IDS)
     logger.info("Frozen core subset size: %s", core_count)
+    logger.info(
+        "Sweep grid values: k_init=%s k=%s conf=%s min_doc=%s min_gap=%s top_ceiling=%s route_unfiltered=%s",
+        retrieval_k_initial_values,
+        retrieval_k_values,
+        confidence_values,
+        min_doc_values,
+        min_gap_values,
+        top_score_ceiling_values,
+        routing_fallback_unfiltered_values,
+    )
     logger.info("Starting retrieval sweep...")
     chain = LegalRAGChain(settings=settings)
     skip_index_scan = _env_flag("SWEEP_SKIP_INDEX_SCAN", default=True)
@@ -968,6 +998,12 @@ def main() -> None:
         ),
         reverse=True,
     )
+    default_row_count = sum(1 for row in rows if bool(row.get("is_profile_default_row")))
+    if default_row_count != 1:
+        raise ValueError(
+            f"Expected exactly one profile-default row, found {default_row_count}. "
+            "Ensure sweep grid includes active trust profile defaults."
+        )
     out_path = ROOT_DIR / "eval" / "retrieval_sweep_results.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False, indent=2)
