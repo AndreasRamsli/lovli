@@ -985,12 +985,30 @@ def main() -> None:
         pair_index.setdefault(key, {})[bool(row.get("law_routing_fallback_unfiltered"))] = row
     compared_pairs = 0
     identical_pairs = 0
+    divergence_counts = {
+        "recall_at_k": 0,
+        "citation_precision": 0,
+        "unexpected_citation_rate": 0,
+        "false_positive_gating_rate": 0,
+        "law_contamination_rate": 0,
+        "balanced_score": 0,
+    }
+    delta_sums = {key: 0.0 for key in divergence_counts}
+    delta_max = {key: 0.0 for key in divergence_counts}
     for pair in pair_index.values():
         if True not in pair or False not in pair:
             continue
         compared_pairs += 1
         left = pair[True]
         right = pair[False]
+        for metric in divergence_counts:
+            left_value = float(left.get(metric, 0.0))
+            right_value = float(right.get(metric, 0.0))
+            diff = abs(left_value - right_value)
+            if diff > 1e-9:
+                divergence_counts[metric] += 1
+            delta_sums[metric] += diff
+            delta_max[metric] = max(delta_max[metric], diff)
         if (
             float(left.get("recall_at_k", 0.0)) == float(right.get("recall_at_k", 0.0))
             and float(left.get("citation_precision", 0.0)) == float(right.get("citation_precision", 0.0))
@@ -1003,6 +1021,21 @@ def main() -> None:
         compared_pairs,
         identical_pairs,
     )
+    if compared_pairs > 0:
+        logger.info(
+            "Parity divergence counts: %s",
+            {key: f"{count}/{compared_pairs}" for key, count in divergence_counts.items()},
+        )
+        logger.info(
+            "Parity absolute delta summary: %s",
+            {
+                key: {
+                    "avg_delta": (delta_sums[key] / compared_pairs),
+                    "max_delta": delta_max[key],
+                }
+                for key in divergence_counts
+            },
+        )
     if compared_pairs > 0 and identical_pairs == compared_pairs:
         logger.warning(
             "Fallback toggle produced identical metrics across all compared pairs. "

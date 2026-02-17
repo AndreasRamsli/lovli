@@ -958,6 +958,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             )
 
         fallback_mode = None
+        uncertainty_selection: dict[str, Any] | None = None
         if self.reranker:
             selected = [
                 candidate
@@ -968,15 +969,38 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             if not selected:
                 selected = scored_candidates[: max(lexical_top_k, rerank_top_k)]
             if _is_uncertain(scored_candidates):
-                broadened = [
-                    candidate
-                    for candidate in scored_candidates
-                    if int(candidate.get("lexical_score", 0)) >= fallback_min_lexical
-                ]
+                broadened: list[dict[str, Any]] = []
+                excluded = 0
+                relaxed_rerank_floor = max(0.0, float(min_confidence) * 0.80)
+                for candidate in scored_candidates:
+                    lexical_ok = int(candidate.get("lexical_score", 0)) >= fallback_min_lexical
+                    rerank_score = candidate.get("law_reranker_score")
+                    rerank_ok = (
+                        rerank_score is not None
+                        and float(rerank_score) >= relaxed_rerank_floor
+                    )
+                    direct_mention = bool(candidate.get("direct_mention"))
+                    if lexical_ok and (direct_mention or rerank_ok):
+                        broadened.append(candidate)
+                    else:
+                        excluded += 1
+                if not broadened:
+                    broadened = [
+                        candidate
+                        for candidate in scored_candidates
+                        if int(candidate.get("lexical_score", 0)) >= fallback_min_lexical
+                    ]
                 if not broadened:
                     broadened = list(scored_candidates)
                 routed = [candidate["law_id"] for candidate in broadened[:fallback_max_laws]]
                 fallback_mode = "uncertainty_staged"
+                uncertainty_selection = {
+                    "fallback_min_lexical": fallback_min_lexical,
+                    "relaxed_rerank_floor": relaxed_rerank_floor,
+                    "candidate_total": len(scored_candidates),
+                    "candidate_selected": len(broadened),
+                    "candidate_excluded": excluded,
+                }
             else:
                 routed = [candidate["law_id"] for candidate in selected[:rerank_top_k]]
         else:
@@ -1010,6 +1034,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             "retrieval_fallback": fallback_mode,
             "retrieval_fallback_stage": "stage1_broadened" if fallback_mode == "uncertainty_staged" else "none",
             "routing_confidence": routing_confidence,
+            "uncertainty_selection": uncertainty_selection or {},
         }
         logger.debug("Law routing candidates for '%s': %s", query, routed)
         return routed
@@ -1046,7 +1071,14 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             )
             docs = filtered_retriever.invoke(query)
             stage1_docs = docs or []
-            if stage1_docs and not self._should_escalate_to_stage2_fallback(query, stage1_docs):
+            should_escalate, escalation_reason = self._should_escalate_to_stage2_fallback(
+                query,
+                stage1_docs,
+                routed_law_ids=routed_law_ids,
+                routing_diagnostics=self._last_routing_diagnostics,
+            )
+            self._last_routing_diagnostics["retrieval_escalation_reason"] = escalation_reason
+            if stage1_docs and not should_escalate:
                 self._last_routing_diagnostics["retrieval_fallback_stage"] = "stage1_accepted"
                 return docs
             self._last_routing_diagnostics["retrieval_fallback"] = "stage1_broadened_low_quality"
@@ -1055,6 +1087,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             logger.warning("Filtered retrieval failed (%s); using unfiltered retrieval.", e)
             self._last_routing_diagnostics["retrieval_fallback"] = f"filtered_retrieval_error:{e}"
             self._last_routing_diagnostics["retrieval_fallback_stage"] = "stage1_error"
+            self._last_routing_diagnostics["retrieval_escalation_reason"] = "stage1_error"
 
         if self.settings.law_routing_fallback_unfiltered:
             self._last_routing_diagnostics["retrieval_fallback"] = "uncertainty_unfiltered_stage2"
@@ -1066,18 +1099,86 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             return stage1_docs
         return []
 
-    def _should_escalate_to_stage2_fallback(self, query: str, docs: list) -> bool:
+    def _should_escalate_to_stage2_fallback(
+        self,
+        query: str,
+        docs: list,
+        routed_law_ids: list[str] | None = None,
+        routing_diagnostics: dict[str, Any] | None = None,
+    ) -> tuple[bool, str]:
         """Escalate staged fallback when broadened retrieval quality is too weak."""
+        routing_diagnostics = routing_diagnostics or self._last_routing_diagnostics or {}
+        routing_confidence = routing_diagnostics.get("routing_confidence") or {}
+        is_uncertain = bool(routing_confidence.get("is_uncertain"))
+        score_gap = routing_confidence.get("score_gap")
+        top_route_score = routing_confidence.get("top_score")
+        scored_candidates = routing_diagnostics.get("scored_candidates") or []
+        candidate_scores = [
+            float(candidate.get("law_reranker_score"))
+            for candidate in scored_candidates
+            if candidate.get("law_reranker_score") is not None
+        ]
+        routing_concentration = None
+        if candidate_scores:
+            top_candidate = max(candidate_scores)
+            total_candidate = sum(max(score, 0.0) for score in candidate_scores)
+            if total_candidate > 0.0:
+                routing_concentration = top_candidate / total_candidate
+        routed_set = {(law_id or "").strip() for law_id in (routed_law_ids or []) if (law_id or "").strip()}
+        stage1_law_ids = set()
+        for doc in docs:
+            metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+            law_id = (metadata.get("law_id") or "").strip()
+            if law_id:
+                stage1_law_ids.add(law_id)
+        overlap_count = len(stage1_law_ids & routed_set) if routed_set else None
         min_docs = max(1, int(self.settings.law_routing_stage1_min_docs))
+        stage1_quality = {
+            "min_docs_threshold": min_docs,
+            "doc_count": len(docs),
+            "is_uncertain": is_uncertain,
+            "routing_concentration": routing_concentration,
+            "routing_top_score": top_route_score,
+            "routing_score_gap": score_gap,
+            "routed_law_count": len(routed_set),
+            "stage1_distinct_law_count": len(stage1_law_ids),
+            "stage1_routed_overlap_count": overlap_count,
+        }
+        self._last_routing_diagnostics["stage1_quality"] = stage1_quality
         if len(docs) < min_docs:
-            return True
+            return True, "insufficient_stage1_docs"
+        if routed_set and overlap_count == 0:
+            return True, "no_routed_law_overlap"
         if not self.reranker:
-            return False
+            if (
+                is_uncertain
+                and routing_concentration is not None
+                and routing_concentration < 0.45
+                and self.settings.law_routing_fallback_unfiltered
+            ):
+                return True, "uncertain_diffuse_routing_without_reranker"
+            return False, "accepted_without_reranker"
         top_docs = docs[: min(len(docs), self.settings.retrieval_k)]
         _docs, scores = self._rerank(query, top_docs, top_k=min(3, len(top_docs)))
         if not scores:
-            return False
-        return float(scores[0]) < float(self.settings.law_routing_stage1_min_top_score)
+            if is_uncertain and self.settings.law_routing_fallback_unfiltered:
+                return True, "uncertain_no_stage1_scores"
+            return False, "accepted_no_scores"
+        top_doc_score = float(scores[0])
+        stage1_quality["stage1_top_doc_score"] = top_doc_score
+        min_top_score = float(self.settings.law_routing_stage1_min_top_score)
+        if top_doc_score < min_top_score:
+            return True, "low_stage1_top_doc_score"
+
+        uncertainty_min_gap = float(self.settings.law_routing_uncertainty_min_gap)
+        uncertainty_ceiling = float(self.settings.law_routing_uncertainty_top_score_ceiling)
+        weak_top = top_route_score is None or float(top_route_score) <= uncertainty_ceiling
+        weak_gap = score_gap is None or float(score_gap) < max(0.01, uncertainty_min_gap * 0.80)
+        diffuse_routing = routing_concentration is not None and float(routing_concentration) < 0.45
+        if is_uncertain and weak_top and (weak_gap or diffuse_routing):
+            if len(stage1_law_ids) > 1 or top_doc_score < (min_top_score + 0.12):
+                return True, "uncertain_diffuse_stage1_escalation"
+        return False, "accepted"
 
     def _routing_alignment_map(self) -> dict[str, float]:
         """Expose per-law routing alignment scores in [0, 1] for rank fusion."""

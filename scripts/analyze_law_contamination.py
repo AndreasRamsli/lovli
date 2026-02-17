@@ -255,16 +255,61 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     routing_selection_mode_counts: dict[str, int] = defaultdict(int)
     route_miss_by_fallback_stage: dict[str, int] = defaultdict(int)
     route_miss_by_routing_mode: dict[str, int] = defaultdict(int)
+    fallback_triggered_by_stage: dict[str, int] = defaultdict(int)
+    fallback_recovered_by_stage: dict[str, int] = defaultdict(int)
+    positive_count_by_stage: dict[str, int] = defaultdict(int)
+    route_miss_count_by_mode_stage: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    positive_count_by_mode_stage: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     route_miss_law_pair_confusions: dict[str, int] = defaultdict(int)
     for row in route_miss_cases:
         expected = ",".join(sorted(row.get("expected_law_ids") or [])) or "__none__"
         dominant = (row.get("dominant_law_id") or "__none__").strip()
         route_miss_law_pair_confusions[f"{expected}->{dominant}"] += 1
-        route_miss_by_fallback_stage[(row.get("fallback_stage") or "none").strip()] += 1
-        route_miss_by_routing_mode[(row.get("routing_selection_mode") or "unknown").strip()] += 1
+        fallback_stage = (row.get("fallback_stage") or "none").strip()
+        routing_mode = (row.get("routing_selection_mode") or "unknown").strip()
+        route_miss_by_fallback_stage[fallback_stage] += 1
+        route_miss_by_routing_mode[routing_mode] += 1
+        route_miss_count_by_mode_stage[routing_mode][fallback_stage] += 1
     for row in results:
-        fallback_stage_counts[(row.get("fallback_stage") or "none").strip()] += 1
-        routing_selection_mode_counts[(row.get("routing_selection_mode") or "unknown").strip()] += 1
+        fallback_stage = (row.get("fallback_stage") or "none").strip()
+        routing_mode = (row.get("routing_selection_mode") or "unknown").strip()
+        fallback_stage_counts[fallback_stage] += 1
+        routing_selection_mode_counts[routing_mode] += 1
+        if row.get("fallback_triggered"):
+            fallback_triggered_by_stage[fallback_stage] += 1
+            if row.get("fallback_recovered"):
+                fallback_recovered_by_stage[fallback_stage] += 1
+        if row.get("expected_sources"):
+            positive_count_by_stage[fallback_stage] += 1
+            positive_count_by_mode_stage[routing_mode][fallback_stage] += 1
+
+    fallback_recovery_rate_by_stage = {
+        stage: (
+            float(fallback_recovered_by_stage.get(stage, 0)) / float(count)
+            if count
+            else 0.0
+        )
+        for stage, count in sorted(fallback_triggered_by_stage.items())
+    }
+    route_miss_rate_by_stage = {
+        stage: (
+            float(route_miss_by_fallback_stage.get(stage, 0)) / float(count)
+            if count
+            else 0.0
+        )
+        for stage, count in sorted(positive_count_by_stage.items())
+    }
+    route_miss_rate_by_mode_stage = {
+        mode: {
+            stage: (
+                float(route_miss_count_by_mode_stage.get(mode, {}).get(stage, 0)) / float(positive_count)
+                if positive_count
+                else 0.0
+            )
+            for stage, positive_count in sorted(stage_counts.items())
+        }
+        for mode, stage_counts in sorted(positive_count_by_mode_stage.items())
+    }
 
     failing_intent_counts: dict[str, int] = defaultdict(int)
     for row in route_miss_cases:
@@ -310,6 +355,13 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         "routing_selection_mode_counts": dict(sorted(routing_selection_mode_counts.items())),
         "route_miss_by_fallback_stage": dict(sorted(route_miss_by_fallback_stage.items())),
         "route_miss_by_routing_mode": dict(sorted(route_miss_by_routing_mode.items())),
+        "fallback_recovery_rate_by_stage": fallback_recovery_rate_by_stage,
+        "route_miss_rate_by_stage": route_miss_rate_by_stage,
+        "route_miss_count_by_mode_stage": {
+            mode: dict(sorted(stage_counts.items()))
+            for mode, stage_counts in sorted(route_miss_count_by_mode_stage.items())
+        },
+        "route_miss_rate_by_mode_stage": route_miss_rate_by_mode_stage,
         "top_route_miss_law_pair_confusions": [
             {"law_pair": pair, "count": count}
             for pair, count in sorted(route_miss_law_pair_confusions.items(), key=lambda item: item[1], reverse=True)[:10]
