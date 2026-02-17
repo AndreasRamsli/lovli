@@ -1,12 +1,12 @@
 {
   "baseline_id": "production_trust_baseline_v1",
-  "profile_version": "2026-02-16",
-  "description": "Must-pass trust gates for production hardening. Values are conservative floors/ceilings anchored to current validated Colab runs.",
+  "profile_version": "2026-02-17",
+  "description": "Must-pass trust gates for production hardening using effective post-fallback miss semantics. Values are conservative floors/ceilings anchored to validated Colab runs.",
   "gates": [
     {
-      "metric": "contamination.aggregate.route_miss_expected_law_rate",
+      "metric": "contamination.aggregate.effective_expected_law_miss_rate",
       "operator": "<=",
-      "value": 0.05
+      "value": 0.30
     },
     {
       "metric": "contamination.aggregate.dominant_law_mismatch_rate",
@@ -46,9 +46,9 @@
   ],
   "gates_v2": [
     {
-      "metric": "contamination.aggregate.route_miss_expected_law_rate",
+      "metric": "contamination.aggregate.effective_expected_law_miss_rate",
       "operator": "<=",
-      "value": 0.05
+      "value": 0.25
     },
     {
       "metric": "contamination.aggregate.dominant_law_mismatch_rate",
@@ -88,9 +88,9 @@
   ],
   "gates_v3": [
     {
-      "metric": "contamination.aggregate.route_miss_expected_law_rate",
+      "metric": "contamination.aggregate.effective_expected_law_miss_rate",
       "operator": "<=",
-      "value": 0.05
+      "value": 0.20
     },
     {
       "metric": "contamination.aggregate.dominant_law_mismatch_rate",

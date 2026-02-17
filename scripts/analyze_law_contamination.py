@@ -198,6 +198,13 @@ def analyze_question(chain: LegalRAGChain, row: dict[str, Any], retrieval_k_init
     dominant_law_mismatch = bool(
         expected_law_ids and dominant_law and dominant_law not in set(expected_law_ids)
     )
+    expected_law_matched_in_dominant = bool(
+        expected_law_ids and dominant_law and dominant_law in set(expected_law_ids)
+    )
+    expected_source_retrieved = bool(matched_expected_pairs > 0)
+    effective_expected_law_miss = bool(
+        expected_law_ids and not expected_law_matched_in_dominant and not expected_source_retrieved
+    )
     fallback_reason = (routing_diagnostics.get("retrieval_fallback") or "").strip()
     fallback_stage = (routing_diagnostics.get("retrieval_fallback_stage") or "none").strip()
     fallback_triggered = bool(fallback_reason)
@@ -222,6 +229,9 @@ def analyze_question(chain: LegalRAGChain, row: dict[str, Any], retrieval_k_init
         "expected_law_ids": expected_law_ids,
         "route_miss_expected_law": route_miss_expected_law,
         "dominant_law_mismatch": dominant_law_mismatch,
+        "expected_law_matched_in_dominant": expected_law_matched_in_dominant,
+        "expected_source_retrieved": expected_source_retrieved,
+        "effective_expected_law_miss": effective_expected_law_miss,
         "fallback_triggered": fallback_triggered,
         "fallback_reason": fallback_reason or None,
         "fallback_stage": fallback_stage or None,
@@ -247,7 +257,38 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     unexpected_total = sum(r.get("unexpected_sources_count", 0) for r in results)
     cited_total = sum(r.get("retrieved_sources_count", 0) for r in results)
     positives = [r for r in results if (r.get("expected_sources") or [])]
+
+    def _effective_expected_law_miss(row: dict[str, Any]) -> bool:
+        """Compute post-fallback miss; supports legacy rows without explicit field."""
+        explicit = row.get("effective_expected_law_miss")
+        if explicit is not None:
+            return bool(explicit)
+        expected_law_ids = set(row.get("expected_law_ids") or [])
+        if not expected_law_ids:
+            expected_law_ids = {
+                (item.get("law_id") or "").strip()
+                for item in (row.get("expected_sources") or [])
+                if (item.get("law_id") or "").strip()
+            }
+        if not expected_law_ids:
+            return False
+        dominant_law = (row.get("dominant_law_id") or "").strip()
+        expected_source_retrieved = row.get("expected_source_retrieved")
+        if expected_source_retrieved is None:
+            matched_expected_source_count = int(row.get("matched_expected_source_count") or 0)
+            expected_source_retrieved = bool(matched_expected_source_count > 0)
+        else:
+            expected_source_retrieved = bool(expected_source_retrieved)
+        expected_law_matched_in_dominant = bool(dominant_law and dominant_law in expected_law_ids)
+        return bool(not expected_law_matched_in_dominant and not expected_source_retrieved)
+
+    # Backward-compatible candidate-routing miss metric (pre-fallback semantics).
     route_miss_cases = [r for r in positives if r.get("route_miss_expected_law")]
+    # Effective miss metric (post-fallback semantics): expected law/source still absent in final retrieval.
+    effective_expected_law_miss_cases = [r for r in positives if _effective_expected_law_miss(r)]
+    recovered_from_route_miss_cases = [
+        r for r in route_miss_cases if not _effective_expected_law_miss(r)
+    ]
     dominant_mismatch_cases = [r for r in positives if r.get("dominant_law_mismatch")]
     fallback_cases = [r for r in results if r.get("fallback_triggered")]
     fallback_recovered_cases = [r for r in fallback_cases if r.get("fallback_recovered")]
@@ -255,12 +296,16 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     routing_selection_mode_counts: dict[str, int] = defaultdict(int)
     route_miss_by_fallback_stage: dict[str, int] = defaultdict(int)
     route_miss_by_routing_mode: dict[str, int] = defaultdict(int)
+    effective_miss_by_fallback_stage: dict[str, int] = defaultdict(int)
+    effective_miss_by_routing_mode: dict[str, int] = defaultdict(int)
     fallback_triggered_by_stage: dict[str, int] = defaultdict(int)
     fallback_recovered_by_stage: dict[str, int] = defaultdict(int)
     positive_count_by_stage: dict[str, int] = defaultdict(int)
     route_miss_count_by_mode_stage: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    effective_miss_count_by_mode_stage: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     positive_count_by_mode_stage: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     route_miss_law_pair_confusions: dict[str, int] = defaultdict(int)
+    effective_miss_law_pair_confusions: dict[str, int] = defaultdict(int)
     for row in route_miss_cases:
         expected = ",".join(sorted(row.get("expected_law_ids") or [])) or "__none__"
         dominant = (row.get("dominant_law_id") or "__none__").strip()
@@ -270,6 +315,15 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         route_miss_by_fallback_stage[fallback_stage] += 1
         route_miss_by_routing_mode[routing_mode] += 1
         route_miss_count_by_mode_stage[routing_mode][fallback_stage] += 1
+    for row in effective_expected_law_miss_cases:
+        expected = ",".join(sorted(row.get("expected_law_ids") or [])) or "__none__"
+        dominant = (row.get("dominant_law_id") or "__none__").strip()
+        effective_miss_law_pair_confusions[f"{expected}->{dominant}"] += 1
+        fallback_stage = (row.get("fallback_stage") or "none").strip()
+        routing_mode = (row.get("routing_selection_mode") or "unknown").strip()
+        effective_miss_by_fallback_stage[fallback_stage] += 1
+        effective_miss_by_routing_mode[routing_mode] += 1
+        effective_miss_count_by_mode_stage[routing_mode][fallback_stage] += 1
     for row in results:
         fallback_stage = (row.get("fallback_stage") or "none").strip()
         routing_mode = (row.get("routing_selection_mode") or "unknown").strip()
@@ -303,6 +357,25 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         mode: {
             stage: (
                 float(route_miss_count_by_mode_stage.get(mode, {}).get(stage, 0)) / float(positive_count)
+                if positive_count
+                else 0.0
+            )
+            for stage, positive_count in sorted(stage_counts.items())
+        }
+        for mode, stage_counts in sorted(positive_count_by_mode_stage.items())
+    }
+    effective_miss_rate_by_stage = {
+        stage: (
+            float(effective_miss_by_fallback_stage.get(stage, 0)) / float(count)
+            if count
+            else 0.0
+        )
+        for stage, count in sorted(positive_count_by_stage.items())
+    }
+    effective_miss_rate_by_mode_stage = {
+        mode: {
+            stage: (
+                float(effective_miss_count_by_mode_stage.get(mode, {}).get(stage, 0)) / float(positive_count)
                 if positive_count
                 else 0.0
             )
@@ -346,6 +419,16 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "route_miss_expected_law_count": len(route_miss_cases),
         "route_miss_expected_law_rate": (len(route_miss_cases) / len(positives)) if positives else 0.0,
+        "routing_candidate_miss_count": len(route_miss_cases),
+        "routing_candidate_miss_rate": (len(route_miss_cases) / len(positives)) if positives else 0.0,
+        "effective_expected_law_miss_count": len(effective_expected_law_miss_cases),
+        "effective_expected_law_miss_rate": (
+            len(effective_expected_law_miss_cases) / len(positives)
+        ) if positives else 0.0,
+        "route_miss_recovered_count": len(recovered_from_route_miss_cases),
+        "route_miss_recovered_rate": (
+            len(recovered_from_route_miss_cases) / len(route_miss_cases)
+        ) if route_miss_cases else 0.0,
         "dominant_law_mismatch_count": len(dominant_mismatch_cases),
         "dominant_law_mismatch_rate": (len(dominant_mismatch_cases) / len(positives)) if positives else 0.0,
         "fallback_triggered_count": len(fallback_cases),
@@ -355,16 +438,32 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         "routing_selection_mode_counts": dict(sorted(routing_selection_mode_counts.items())),
         "route_miss_by_fallback_stage": dict(sorted(route_miss_by_fallback_stage.items())),
         "route_miss_by_routing_mode": dict(sorted(route_miss_by_routing_mode.items())),
+        "effective_miss_by_fallback_stage": dict(sorted(effective_miss_by_fallback_stage.items())),
+        "effective_miss_by_routing_mode": dict(sorted(effective_miss_by_routing_mode.items())),
         "fallback_recovery_rate_by_stage": fallback_recovery_rate_by_stage,
         "route_miss_rate_by_stage": route_miss_rate_by_stage,
+        "effective_miss_rate_by_stage": effective_miss_rate_by_stage,
         "route_miss_count_by_mode_stage": {
             mode: dict(sorted(stage_counts.items()))
             for mode, stage_counts in sorted(route_miss_count_by_mode_stage.items())
         },
         "route_miss_rate_by_mode_stage": route_miss_rate_by_mode_stage,
+        "effective_miss_count_by_mode_stage": {
+            mode: dict(sorted(stage_counts.items()))
+            for mode, stage_counts in sorted(effective_miss_count_by_mode_stage.items())
+        },
+        "effective_miss_rate_by_mode_stage": effective_miss_rate_by_mode_stage,
         "top_route_miss_law_pair_confusions": [
             {"law_pair": pair, "count": count}
             for pair, count in sorted(route_miss_law_pair_confusions.items(), key=lambda item: item[1], reverse=True)[:10]
+        ],
+        "top_effective_miss_law_pair_confusions": [
+            {"law_pair": pair, "count": count}
+            for pair, count in sorted(
+                effective_miss_law_pair_confusions.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:10]
         ],
         "top_failing_intent_clusters": failing_intent_clusters[:10],
     }
@@ -500,7 +599,10 @@ def main() -> None:
         "question_count": len(questions),
     }
     gate_summary = {
+        # Legacy gate metric (pre-fallback candidate semantics). Keep during migration.
         "route_miss_expected_law_rate": aggregate.get("route_miss_expected_law_rate"),
+        "routing_candidate_miss_rate": aggregate.get("routing_candidate_miss_rate"),
+        "effective_expected_law_miss_rate": aggregate.get("effective_expected_law_miss_rate"),
         "dominant_law_mismatch_rate": aggregate.get("dominant_law_mismatch_rate"),
         "unexpected_citation_rate": aggregate.get("unexpected_citation_rate"),
         "fallback_recovery_rate": aggregate.get("fallback_recovery_rate"),
@@ -527,12 +629,18 @@ def main() -> None:
         aggregate["unexpected_citation_rate"] * 100.0,
     )
     logger.info(
-        "Gate summary: route_miss=%.4f dominant_mismatch=%.4f unexpected=%.4f fallback_recovery=%.4f fallback_count=%s",
+        "Gate summary: candidate_route_miss=%.4f effective_route_miss=%.4f "
+        "dominant_mismatch=%.4f unexpected=%.4f fallback_recovery=%.4f fallback_count=%s",
         float(gate_summary["route_miss_expected_law_rate"] or 0.0),
+        float(gate_summary["effective_expected_law_miss_rate"] or 0.0),
         float(gate_summary["dominant_law_mismatch_rate"] or 0.0),
         float(gate_summary["unexpected_citation_rate"] or 0.0),
         float(gate_summary["fallback_recovery_rate"] or 0.0),
         int(gate_summary["fallback_triggered_count"] or 0),
+    )
+    logger.info(
+        "Compatibility note: route_miss_expected_law_rate uses pre-fallback routing-candidate semantics. "
+        "Use effective_expected_law_miss_rate for post-fallback gate decisions."
     )
 
 
