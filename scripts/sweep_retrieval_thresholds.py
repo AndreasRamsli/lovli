@@ -10,8 +10,11 @@ import itertools
 import json
 import logging
 import os
+import hashlib
+import subprocess
 import sys
 from pathlib import Path
+from datetime import datetime, timezone
 
 try:
     from dotenv import load_dotenv
@@ -60,6 +63,30 @@ def load_questions(path: Path) -> list[dict]:
             if line:
                 questions.append(json.loads(line))
     return questions
+
+
+def _safe_git_commit() -> str:
+    """Best-effort current git commit SHA."""
+    try:
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(ROOT_DIR),
+                text=True,
+            )
+            .strip()
+        )
+    except Exception:
+        return "unknown"
+
+
+def _sha256_file(path: Path) -> str:
+    """Compute sha256 digest for a file."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def classify_case_type(row: dict) -> str:
@@ -237,6 +264,8 @@ def precompute_candidates(
                     ((route_diag_after.get("routing_confidence") or {}).get("is_uncertain"))
                 ),
                 "routing_alignment_by_law": _build_routing_alignment_map(route_diag_after),
+                "retrieval_fallback_stage": route_diag_after.get("retrieval_fallback_stage"),
+                "retrieval_fallback": route_diag_after.get("retrieval_fallback"),
                 "candidates": candidates,
             }
         )
@@ -292,6 +321,11 @@ def evaluate_combo(
     weighted_positive_recall_numerator = 0.0
     weighted_positive_recall_denominator = 0.0
     top_scores: list[float] = []
+    routing_uncertain_count = 0
+    fallback_stage1_accepted_count = 0
+    fallback_stage1_low_quality_kept_count = 0
+    fallback_stage2_unfiltered_count = 0
+    fallback_stage1_error_count = 0
     final_k = chain.settings.retrieval_k
     min_sources = chain.settings.reranker_min_sources
     segment = {
@@ -320,6 +354,17 @@ def evaluate_combo(
         negative_type = row.get("negative_type", "unknown")
         is_core = bool(row.get("is_core"))
         expects_editorial_context = bool(row.get("expects_editorial_context", False))
+        if bool(row.get("routing_is_uncertain")):
+            routing_uncertain_count += 1
+        fallback_stage = (row.get("retrieval_fallback_stage") or "").strip()
+        if fallback_stage == "stage1_accepted":
+            fallback_stage1_accepted_count += 1
+        elif fallback_stage == "stage1_low_quality_kept":
+            fallback_stage1_low_quality_kept_count += 1
+        elif fallback_stage == "stage2_unfiltered":
+            fallback_stage2_unfiltered_count += 1
+        elif fallback_stage == "stage1_error":
+            fallback_stage1_error_count += 1
 
         # Simulate retrieval_k_initial by truncating pre-rerank candidates.
         subset = candidates[:retrieval_k_initial]
@@ -702,6 +747,11 @@ def evaluate_combo(
         "core_non_editorial_clean_success": core_non_editorial_clean_success,
         "calibration_bins": calibration_diagnostics,
         "expected_calibration_error": expected_calibration_error,
+        "routing_uncertain_count": routing_uncertain_count,
+        "fallback_stage1_accepted_count": fallback_stage1_accepted_count,
+        "fallback_stage1_low_quality_kept_count": fallback_stage1_low_quality_kept_count,
+        "fallback_stage2_unfiltered_count": fallback_stage2_unfiltered_count,
+        "fallback_stage1_error_count": fallback_stage1_error_count,
     }
     metrics["balanced_score"] = _compute_balanced_score(metrics)
     return metrics
@@ -745,10 +795,20 @@ def main() -> None:
     settings = get_settings()
     profile_name = os.getenv("TRUST_PROFILE", settings.trust_profile_name)
     resolved_profile = apply_trust_profile(settings, profile_name)
+    run_started_at = datetime.now(timezone.utc).isoformat()
+    run_id = os.getenv("LOVLI_RUN_ID") or f"sweep_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    questions_sha256 = _sha256_file(questions_path)
+    git_commit = _safe_git_commit()
     logger.info(
         "Using trust profile: %s (version=%s)",
         resolved_profile,
         settings.trust_profile_version,
+    )
+    logger.info(
+        "Run metadata: run_id=%s git_commit=%s questions_sha256=%s",
+        run_id,
+        git_commit,
+        questions_sha256[:12],
     )
     profile_defaults = {
         "retrieval_k_initial": settings.retrieval_k_initial,
@@ -830,6 +890,11 @@ def main() -> None:
             top_score_ceiling=top_score_ceiling,
         )
         row = {
+            "run_id": run_id,
+            "run_started_at": run_started_at,
+            "git_commit": git_commit,
+            "questions_sha256": questions_sha256,
+            "question_count": len(questions),
             "trust_profile_name": settings.trust_profile_name,
             "trust_profile_version": settings.trust_profile_version,
             "sweep_source_profile_name": resolved_profile,
@@ -855,6 +920,7 @@ def main() -> None:
             "balanced=%.3f recall=%.3f coverage=%.3f precision=%.3f unexpected=%.3f "
             "law_contam=%.3f coherence_dropped=%s "
             "fp_gate=%.3f cw_recall=%.3f floor_triggers=%s conf_gate=%s amb_gate=%s "
+            "uncertain=%s stage2_unfiltered=%s "
             "single=%.3f multi=%.3f neg=%.3f neg_legal=%.3f neg_nonlegal=%.3f "
             "editorial=%.3f non_editorial_clean=%.3f avg_top=%.3f",
             retrieval_k_initial,
@@ -876,6 +942,8 @@ def main() -> None:
             metrics["min_sources_floor_trigger_count"],
             metrics["confidence_gating_count"],
             metrics["ambiguity_gating_count"],
+            metrics["routing_uncertain_count"],
+            metrics["fallback_stage2_unfiltered_count"],
             metrics["single_article_recall_at_k"],
             metrics["multi_article_recall_at_k"],
             metrics["negative_success"],
@@ -903,6 +971,43 @@ def main() -> None:
     out_path = ROOT_DIR / "eval" / "retrieval_sweep_results.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False, indent=2)
+
+    pair_index: dict[tuple, dict[bool, dict]] = {}
+    for row in rows:
+        key = (
+            row.get("retrieval_k_initial"),
+            row.get("retrieval_k"),
+            row.get("reranker_confidence_threshold"),
+            row.get("reranker_min_doc_score"),
+            row.get("reranker_ambiguity_min_gap"),
+            row.get("reranker_ambiguity_top_score_ceiling"),
+        )
+        pair_index.setdefault(key, {})[bool(row.get("law_routing_fallback_unfiltered"))] = row
+    compared_pairs = 0
+    identical_pairs = 0
+    for pair in pair_index.values():
+        if True not in pair or False not in pair:
+            continue
+        compared_pairs += 1
+        left = pair[True]
+        right = pair[False]
+        if (
+            float(left.get("recall_at_k", 0.0)) == float(right.get("recall_at_k", 0.0))
+            and float(left.get("citation_precision", 0.0)) == float(right.get("citation_precision", 0.0))
+            and float(left.get("unexpected_citation_rate", 0.0))
+            == float(right.get("unexpected_citation_rate", 0.0))
+        ):
+            identical_pairs += 1
+    logger.info(
+        "Parity debug: compared_fallback_pairs=%s identical_metric_pairs=%s",
+        compared_pairs,
+        identical_pairs,
+    )
+    if compared_pairs > 0 and identical_pairs == compared_pairs:
+        logger.warning(
+            "Fallback toggle produced identical metrics across all compared pairs. "
+            "Inspect routing/fallback candidate split diagnostics."
+        )
 
     logger.info("Saved results: %s", out_path)
     logger.info("Top 5 configurations:")

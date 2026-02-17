@@ -33,6 +33,65 @@ def _get_nested(data: dict[str, Any], dotted_path: str) -> float | None:
     return None
 
 
+def _artifact_metadata_from_sweep_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Extract run metadata from sweep rows (uses first row as source of truth)."""
+    if not rows:
+        return {}
+    first = rows[0]
+    return {
+        "run_id": first.get("run_id"),
+        "run_started_at": first.get("run_started_at"),
+        "git_commit": first.get("git_commit"),
+        "questions_sha256": first.get("questions_sha256"),
+        "question_count": first.get("question_count"),
+        "trust_profile_name": first.get("trust_profile_name"),
+        "trust_profile_version": first.get("trust_profile_version"),
+    }
+
+
+def _validate_artifact_compatibility(
+    contamination: dict[str, Any],
+    sweep_rows: list[dict[str, Any]],
+) -> None:
+    """Fail fast if contamination/sweep artifacts appear to come from different runs."""
+    contamination_meta = contamination.get("artifact_metadata") or {}
+    sweep_meta = _artifact_metadata_from_sweep_rows(sweep_rows)
+    required_keys = ["run_id", "git_commit", "questions_sha256", "question_count"]
+    missing_meta: list[str] = []
+    for key in required_keys:
+        if contamination_meta.get(key) in (None, ""):
+            missing_meta.append(f"contamination.{key}")
+        if sweep_meta.get(key) in (None, ""):
+            missing_meta.append(f"sweep.{key}")
+    if missing_meta:
+        raise ValueError(
+            "Artifact metadata missing required fields. "
+            "Re-run contamination+sweep in the same run envelope. Missing: "
+            + ", ".join(missing_meta)
+        )
+    logger.info(
+        "Artifact metadata: contamination.run_id=%s sweep.run_id=%s contamination.git=%s sweep.git=%s",
+        contamination_meta.get("run_id"),
+        sweep_meta.get("run_id"),
+        contamination_meta.get("git_commit"),
+        sweep_meta.get("git_commit"),
+    )
+    keys_to_match = required_keys + ["trust_profile_name", "trust_profile_version"]
+    mismatches: list[str] = []
+    for key in keys_to_match:
+        left = contamination_meta.get(key)
+        right = sweep_meta.get(key)
+        if left is None or right is None:
+            continue
+        if str(left) != str(right):
+            mismatches.append(f"{key}: contamination={left} sweep={right}")
+    if mismatches:
+        raise ValueError(
+            "Artifact compatibility check failed. Contamination and sweep reports do not match: "
+            + "; ".join(mismatches)
+        )
+
+
 def _pick_gate_sweep_row(rows: list[dict[str, Any]], profile_name: str | None) -> dict[str, Any]:
     """
     Pick the sweep row used for regression gates.
@@ -113,6 +172,7 @@ def main() -> None:
     contamination = _read_json(args.contamination_report)
     sweep_rows = _read_json(args.sweep_results)
     baseline = _read_json(args.baseline)
+    _validate_artifact_compatibility(contamination, sweep_rows)
 
     if args.profile:
         contamination_profile = contamination.get("trust_profile_name")

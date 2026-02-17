@@ -14,8 +14,11 @@ import json
 import logging
 import os
 import re
+import hashlib
+import subprocess
 import sys
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
 from typing import Any
@@ -43,6 +46,30 @@ INTENT_TERMS = {
     "utleier",
     "leietaker",
 }
+
+
+def _safe_git_commit() -> str:
+    """Best-effort current git commit SHA."""
+    try:
+        return (
+            subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(ROOT_DIR),
+                text=True,
+            )
+            .strip()
+        )
+    except Exception:
+        return "unknown"
+
+
+def _sha256_file(path: Path) -> str:
+    """Compute sha256 digest for a file."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def load_questions(path: Path) -> list[dict[str, Any]]:
@@ -172,8 +199,12 @@ def analyze_question(chain: LegalRAGChain, row: dict[str, Any], retrieval_k_init
         expected_law_ids and dominant_law and dominant_law not in set(expected_law_ids)
     )
     fallback_reason = (routing_diagnostics.get("retrieval_fallback") or "").strip()
+    fallback_stage = (routing_diagnostics.get("retrieval_fallback_stage") or "none").strip()
     fallback_triggered = bool(fallback_reason)
     fallback_recovered = bool(fallback_triggered and matched_expected_pairs > 0)
+    routing_confidence = routing_diagnostics.get("routing_confidence") or {}
+    routing_selection_mode = (routing_confidence.get("selection_mode") or "unknown").strip()
+    routing_mode = (routing_confidence.get("mode") or "unknown").strip()
 
     return {
         "id": row.get("id"),
@@ -193,7 +224,10 @@ def analyze_question(chain: LegalRAGChain, row: dict[str, Any], retrieval_k_init
         "dominant_law_mismatch": dominant_law_mismatch,
         "fallback_triggered": fallback_triggered,
         "fallback_reason": fallback_reason or None,
+        "fallback_stage": fallback_stage or None,
         "fallback_recovered": fallback_recovered,
+        "routing_selection_mode": routing_selection_mode,
+        "routing_mode": routing_mode,
         "intent_terms": _extract_intent_terms(question),
         "routed_law_ids": routed_law_ids,
         "routing_diagnostics": routing_diagnostics,
@@ -217,6 +251,20 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     dominant_mismatch_cases = [r for r in positives if r.get("dominant_law_mismatch")]
     fallback_cases = [r for r in results if r.get("fallback_triggered")]
     fallback_recovered_cases = [r for r in fallback_cases if r.get("fallback_recovered")]
+    fallback_stage_counts: dict[str, int] = defaultdict(int)
+    routing_selection_mode_counts: dict[str, int] = defaultdict(int)
+    route_miss_by_fallback_stage: dict[str, int] = defaultdict(int)
+    route_miss_by_routing_mode: dict[str, int] = defaultdict(int)
+    route_miss_law_pair_confusions: dict[str, int] = defaultdict(int)
+    for row in route_miss_cases:
+        expected = ",".join(sorted(row.get("expected_law_ids") or [])) or "__none__"
+        dominant = (row.get("dominant_law_id") or "__none__").strip()
+        route_miss_law_pair_confusions[f"{expected}->{dominant}"] += 1
+        route_miss_by_fallback_stage[(row.get("fallback_stage") or "none").strip()] += 1
+        route_miss_by_routing_mode[(row.get("routing_selection_mode") or "unknown").strip()] += 1
+    for row in results:
+        fallback_stage_counts[(row.get("fallback_stage") or "none").strip()] += 1
+        routing_selection_mode_counts[(row.get("routing_selection_mode") or "unknown").strip()] += 1
 
     failing_intent_counts: dict[str, int] = defaultdict(int)
     for row in route_miss_cases:
@@ -258,6 +306,14 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         "fallback_triggered_count": len(fallback_cases),
         "fallback_recovered_count": len(fallback_recovered_cases),
         "fallback_recovery_rate": (len(fallback_recovered_cases) / len(fallback_cases)) if fallback_cases else 0.0,
+        "fallback_stage_counts": dict(sorted(fallback_stage_counts.items())),
+        "routing_selection_mode_counts": dict(sorted(routing_selection_mode_counts.items())),
+        "route_miss_by_fallback_stage": dict(sorted(route_miss_by_fallback_stage.items())),
+        "route_miss_by_routing_mode": dict(sorted(route_miss_by_routing_mode.items())),
+        "top_route_miss_law_pair_confusions": [
+            {"law_pair": pair, "count": count}
+            for pair, count in sorted(route_miss_law_pair_confusions.items(), key=lambda item: item[1], reverse=True)[:10]
+        ],
         "top_failing_intent_clusters": failing_intent_clusters[:10],
     }
 
@@ -346,10 +402,20 @@ def main() -> None:
     settings = get_settings()
     profile_name = os.getenv("TRUST_PROFILE", settings.trust_profile_name)
     resolved_profile = apply_trust_profile(settings, profile_name)
+    run_started_at = datetime.now(timezone.utc).isoformat()
+    run_id = os.getenv("LOVLI_RUN_ID") or f"contam_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    git_commit = _safe_git_commit()
+    questions_sha256 = _sha256_file(args.questions)
     logger.info(
         "Using trust profile: %s (version=%s)",
         resolved_profile,
         settings.trust_profile_version,
+    )
+    logger.info(
+        "Run metadata: run_id=%s git_commit=%s questions_sha256=%s",
+        run_id,
+        git_commit,
+        questions_sha256[:12],
     )
     if args.retrieval_k_initial is not None and args.retrieval_k_initial > 0:
         settings.retrieval_k_initial = args.retrieval_k_initial
@@ -369,9 +435,30 @@ def main() -> None:
 
     aggregate = summarize(rows)
     hard_cluster_summary = build_hard_cluster_summary(rows)
+    artifact_metadata = {
+        "artifact_type": "law_contamination_report",
+        "run_id": run_id,
+        "run_started_at": run_started_at,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "git_commit": git_commit,
+        "trust_profile_name": settings.trust_profile_name,
+        "trust_profile_version": settings.trust_profile_version,
+        "questions_path": str(args.questions),
+        "questions_sha256": questions_sha256,
+        "question_count": len(questions),
+    }
+    gate_summary = {
+        "route_miss_expected_law_rate": aggregate.get("route_miss_expected_law_rate"),
+        "dominant_law_mismatch_rate": aggregate.get("dominant_law_mismatch_rate"),
+        "unexpected_citation_rate": aggregate.get("unexpected_citation_rate"),
+        "fallback_recovery_rate": aggregate.get("fallback_recovery_rate"),
+        "fallback_triggered_count": aggregate.get("fallback_triggered_count"),
+    }
     report = {
         "trust_profile_name": settings.trust_profile_name,
         "trust_profile_version": settings.trust_profile_version,
+        "artifact_metadata": artifact_metadata,
+        "gate_summary": gate_summary,
         "aggregate": aggregate,
         "hard_cluster_summary": hard_cluster_summary,
         "per_question": rows,
@@ -386,6 +473,14 @@ def main() -> None:
         aggregate["contamination_rate"] * 100.0,
         aggregate["singleton_foreign_rate"] * 100.0,
         aggregate["unexpected_citation_rate"] * 100.0,
+    )
+    logger.info(
+        "Gate summary: route_miss=%.4f dominant_mismatch=%.4f unexpected=%.4f fallback_recovery=%.4f fallback_count=%s",
+        float(gate_summary["route_miss_expected_law_rate"] or 0.0),
+        float(gate_summary["dominant_law_mismatch_rate"] or 0.0),
+        float(gate_summary["unexpected_citation_rate"] or 0.0),
+        float(gate_summary["fallback_recovery_rate"] or 0.0),
+        int(gate_summary["fallback_triggered_count"] or 0),
     )
 
 
