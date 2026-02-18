@@ -38,6 +38,21 @@ def mock_settings():
     settings.law_catalog_path = "data/law_catalog.json"
     settings.law_routing_max_candidates = 3
     settings.law_routing_min_token_overlap = 1
+    settings.law_routing_prefilter_k = 80
+    settings.law_routing_min_confidence = 0.30
+    settings.law_routing_rerank_top_k = 6
+    settings.law_routing_fallback_max_laws = 12
+    settings.law_routing_fallback_min_lexical_support = 1
+    settings.law_routing_summary_dualpass_enabled = False
+    settings.law_routing_uncertainty_top_score_ceiling = 0.55
+    settings.law_routing_uncertainty_min_gap = 0.04
+    settings.law_routing_fallback_unfiltered = True
+    settings.law_routing_stage1_min_docs = 2
+    settings.law_routing_stage1_min_top_score = 0.32
+    settings.law_routing_stage1_min_mean_score = 0.26
+    settings.law_routing_dualpass_summary_weight = 0.45
+    settings.law_routing_dualpass_title_weight = 0.35
+    settings.law_routing_dualpass_fulltext_weight = 0.20
     return settings
 
 

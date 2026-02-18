@@ -57,7 +57,11 @@ This document describes Lovli's retrieval-quality goals and how we track metrics
 
 ### Sweep script: `scripts/sweep_retrieval_thresholds.py`
 
-Runs retrieval-only evaluation (no answer generation) over threshold combinations. For each combo it:
+Runs retrieval-only evaluation (no answer generation) over threshold combinations.
+
+**Optional cache:** Set `SWEEP_CACHE_DIR` (e.g. `eval/cache/sweep`) to persist precomputed candidates. Cache is keyed by `questions_sha256`, `git_commit`, collection, `max_k_initial`, and routing mode flags. On key mismatch, cache is bypassed.
+
+For each combo it:
 
 1. Precomputes candidates (retrieval + reranking) once per question.
 2. Applies threshold combos offline (no re-fetch).
@@ -128,6 +132,20 @@ Runs the full pipeline in Colab (GPU):
 - **balanced_v1**: Lower thresholds (recall/precision vs contamination tradeoff).
 - **strict_v1**: Higher thresholds, stricter gating.
 - Chosen via `TRUST_PROFILE`; gates use the same profile name to select the baseline row.
+
+---
+
+## Two-speed testing workflow
+
+| Mode | When to use | SWEEP_SAMPLE_SIZE | SWEEP_QUICK_GRID | Gate checks |
+|------|-------------|--------------------|------------------|-------------|
+| **quick_iteration** | After each tuning change | 20 | true | Skipped (quick run only) |
+| **full_validation** | Before promotion / final decision | (none) | (none) | Run gates v1/v2 |
+
+- Set `RUN_MODE=quick_iteration` in the Colab env cell for fast feedback (~2–5 min).
+- Optional: `FORCE_REFRESH=true` forces extraction and catalog merge; `SKIP_VALIDATE_REINDEX=true` skips smoke checks.
+- Set `RUN_MODE=full_validation` (or leave default) for final validation (~30–60 min).
+- **Promotion / gate decisions must use full_validation runs.**
 
 ---
 

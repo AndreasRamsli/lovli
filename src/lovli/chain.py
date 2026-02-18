@@ -431,13 +431,21 @@ Kontekst fra lovtekster:
             for candidate in candidates
         ]
         try:
-            raw_scores = self.reranker.predict(fulltext_pairs)
-            law_scores = normalize_sigmoid_scores(raw_scores)
-            summary_scores = None
-            title_scores = None
             if dualpass_enabled:
-                summary_scores = normalize_sigmoid_scores(self.reranker.predict(summary_pairs))
-                title_scores = normalize_sigmoid_scores(self.reranker.predict(title_pairs))
+                all_pairs = fulltext_pairs + summary_pairs + title_pairs
+                all_raw = self.reranker.predict(all_pairs)
+                n = len(candidates)
+                raw_fulltext = all_raw[:n]
+                raw_summary = all_raw[n : 2 * n]
+                raw_title = all_raw[2 * n : 3 * n]
+                law_scores = normalize_sigmoid_scores(raw_fulltext)
+                summary_scores = normalize_sigmoid_scores(raw_summary)
+                title_scores = normalize_sigmoid_scores(raw_title)
+            else:
+                raw_scores = self.reranker.predict(fulltext_pairs)
+                law_scores = normalize_sigmoid_scores(raw_scores)
+                summary_scores = None
+                title_scores = None
         except Exception as exc:
             logger.warning("Law-level reranker scoring failed; falling back to lexical routing (%s)", exc)
             for candidate in candidates:

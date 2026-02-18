@@ -105,6 +105,23 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _precompute_cache_key(
+    questions_sha256: str,
+    git_commit: str,
+    qdrant_collection: str,
+    max_k_initial: int,
+    fallback_unfiltered: bool,
+    reranker_ctx_enabled: bool,
+    dualpass_enabled: bool,
+) -> str:
+    """Deterministic cache key for precomputed candidates. Invalidation on any input change."""
+    blob = (
+        f"{questions_sha256}|{git_commit}|{qdrant_collection}|{max_k_initial}|"
+        f"{fallback_unfiltered}|{reranker_ctx_enabled}|{dualpass_enabled}"
+    )
+    return hashlib.sha256(blob.encode()).hexdigest()[:24]
+
+
 def classify_case_type(row: dict) -> str:
     """Infer or return declared case type for segmented reporting."""
     case_type = row.get("case_type")
@@ -966,33 +983,47 @@ def main() -> None:
         "law_rank_fusion_enabled": settings.law_rank_fusion_enabled,
     }
 
-    retrieval_k_initial_values = _with_default_value([15, 20], int(settings.retrieval_k_initial))
-    retrieval_k_values = _with_default_value([3, 5], int(settings.retrieval_k))
-    confidence_values = _with_default_value(
-        [0.30, 0.35, 0.45, 0.55],
-        float(settings.reranker_confidence_threshold),
-    )
-    min_doc_values = _with_default_value(
-        [0.25, 0.35, 0.45, 0.55],
-        float(settings.reranker_min_doc_score),
-    )
-    min_gap_values = _with_default_value([0.05, 0.10], float(settings.reranker_ambiguity_min_gap))
-    top_score_ceiling_values = _with_default_value(
-        [0.60, 0.70],
-        float(settings.reranker_ambiguity_top_score_ceiling),
-    )
-    routing_fallback_unfiltered_values = [True, False]
-    if bool(settings.law_routing_fallback_unfiltered) not in routing_fallback_unfiltered_values:
-        routing_fallback_unfiltered_values.append(bool(settings.law_routing_fallback_unfiltered))
-    routing_fallback_unfiltered_values = sorted(set(routing_fallback_unfiltered_values), reverse=True)
-    reranker_context_enrichment_values = [True, False]
-    if bool(settings.reranker_context_enrichment_enabled) not in reranker_context_enrichment_values:
-        reranker_context_enrichment_values.append(bool(settings.reranker_context_enrichment_enabled))
-    reranker_context_enrichment_values = sorted(set(reranker_context_enrichment_values), reverse=True)
-    routing_summary_dualpass_values = [False, True]
-    if bool(settings.law_routing_summary_dualpass_enabled) not in routing_summary_dualpass_values:
-        routing_summary_dualpass_values.append(bool(settings.law_routing_summary_dualpass_enabled))
-    routing_summary_dualpass_values = sorted(set(routing_summary_dualpass_values), reverse=True)
+    quick_grid = _env_flag("SWEEP_QUICK_GRID", default=False)
+    if quick_grid:
+        retrieval_k_initial_values = [int(settings.retrieval_k_initial)]
+        retrieval_k_values = [int(settings.retrieval_k)]
+        confidence_values = [float(settings.reranker_confidence_threshold)]
+        min_doc_values = [float(settings.reranker_min_doc_score)]
+        min_gap_values = [float(settings.reranker_ambiguity_min_gap)]
+        top_score_ceiling_values = [float(settings.reranker_ambiguity_top_score_ceiling)]
+        routing_fallback_unfiltered_values = [bool(settings.law_routing_fallback_unfiltered)]
+        reranker_context_enrichment_values = [bool(settings.reranker_context_enrichment_enabled)]
+        routing_summary_dualpass_values = [bool(settings.law_routing_summary_dualpass_enabled)]
+        logger.info("SWEEP_QUICK_GRID=true: using profile-default values only (single combo)")
+    else:
+        retrieval_k_initial_values = _with_default_value([15, 20], int(settings.retrieval_k_initial))
+        retrieval_k_values = _with_default_value([3, 5], int(settings.retrieval_k))
+        confidence_values = _with_default_value(
+            [0.30, 0.35, 0.45, 0.55],
+            float(settings.reranker_confidence_threshold),
+        )
+        min_doc_values = _with_default_value(
+            [0.25, 0.35, 0.45, 0.55],
+            float(settings.reranker_min_doc_score),
+        )
+        min_gap_values = _with_default_value([0.05, 0.10], float(settings.reranker_ambiguity_min_gap))
+        top_score_ceiling_values = _with_default_value(
+            [0.60, 0.70],
+            float(settings.reranker_ambiguity_top_score_ceiling),
+        )
+        routing_fallback_unfiltered_values = [True, False]
+    if not quick_grid:
+        if bool(settings.law_routing_fallback_unfiltered) not in routing_fallback_unfiltered_values:
+            routing_fallback_unfiltered_values.append(bool(settings.law_routing_fallback_unfiltered))
+        routing_fallback_unfiltered_values = sorted(set(routing_fallback_unfiltered_values), reverse=True)
+        reranker_context_enrichment_values = [True, False]
+        if bool(settings.reranker_context_enrichment_enabled) not in reranker_context_enrichment_values:
+            reranker_context_enrichment_values.append(bool(settings.reranker_context_enrichment_enabled))
+        reranker_context_enrichment_values = sorted(set(reranker_context_enrichment_values), reverse=True)
+        routing_summary_dualpass_values = [False, True]
+        if bool(settings.law_routing_summary_dualpass_enabled) not in routing_summary_dualpass_values:
+            routing_summary_dualpass_values.append(bool(settings.law_routing_summary_dualpass_enabled))
+        routing_summary_dualpass_values = sorted(set(routing_summary_dualpass_values), reverse=True)
 
     logger.info("Loaded %s questions", len(questions))
     core_count = sum(1 for row in questions if row.get("id") in CORE_QUESTION_IDS)
@@ -1015,7 +1046,10 @@ def main() -> None:
     skip_index_scan = _env_flag("SWEEP_SKIP_INDEX_SCAN", default=True)
     validate_questions(questions, chain, skip_index_scan=skip_index_scan)
     max_k_initial = max(retrieval_k_initial_values)
+    cache_dir_raw = os.getenv("SWEEP_CACHE_DIR")
+    cache_dir = Path(cache_dir_raw) if cache_dir_raw and cache_dir_raw.strip() else None
     cached_candidates_by_mode: dict[tuple[bool, bool, bool], list[dict]] = {}
+    qdrant_collection = settings.qdrant_collection_name
     for fallback_unfiltered, reranker_ctx_enabled, dualpass_enabled in itertools.product(
         routing_fallback_unfiltered_values,
         reranker_context_enrichment_values,
@@ -1024,17 +1058,56 @@ def main() -> None:
         chain.settings.law_routing_fallback_unfiltered = fallback_unfiltered
         chain.settings.reranker_context_enrichment_enabled = reranker_ctx_enabled
         chain.settings.law_routing_summary_dualpass_enabled = dualpass_enabled
-        cache_key = (fallback_unfiltered, reranker_ctx_enabled, dualpass_enabled)
-        logger.info(
-            "Precomputing candidates with k=%s (route_unfiltered=%s reranker_ctx=%s dualpass=%s)...",
-            max_k_initial,
-            fallback_unfiltered,
-            reranker_ctx_enabled,
-            dualpass_enabled,
+        cache_key_tuple = (fallback_unfiltered, reranker_ctx_enabled, dualpass_enabled)
+        key_hash = _precompute_cache_key(
+            questions_sha256, git_commit, qdrant_collection, max_k_initial,
+            fallback_unfiltered, reranker_ctx_enabled, dualpass_enabled,
         )
-        cached_candidates_by_mode[cache_key] = precompute_candidates(
-            chain, questions, max_k_initial=max_k_initial
-        )
+        cache_path = None
+        if cache_dir:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_path = cache_dir / f"sweep_precompute_{key_hash}.json"
+        loaded = False
+        if cache_path and cache_path.exists():
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if (
+                    data.get("questions_sha256") == questions_sha256
+                    and data.get("git_commit") == git_commit
+                    and data.get("qdrant_collection") == qdrant_collection
+                    and data.get("max_k_initial") == max_k_initial
+                ):
+                    cached_candidates_by_mode[cache_key_tuple] = data["candidates"]
+                    loaded = True
+                    logger.info("Loaded precompute cache %s (route_unfiltered=%s reranker_ctx=%s dualpass=%s)", key_hash[:12], fallback_unfiltered, reranker_ctx_enabled, dualpass_enabled)
+            except Exception as e:
+                logger.warning("Cache load failed for %s: %s", cache_path, e)
+        if not loaded:
+            logger.info(
+                "Precomputing candidates with k=%s (route_unfiltered=%s reranker_ctx=%s dualpass=%s)...",
+                max_k_initial, fallback_unfiltered, reranker_ctx_enabled, dualpass_enabled,
+            )
+            cached_candidates_by_mode[cache_key_tuple] = precompute_candidates(
+                chain, questions, max_k_initial=max_k_initial
+            )
+            if cache_path:
+                try:
+                    with open(cache_path, "w", encoding="utf-8") as f:
+                        json.dump(
+                            {
+                                "questions_sha256": questions_sha256,
+                                "git_commit": git_commit,
+                                "qdrant_collection": qdrant_collection,
+                                "max_k_initial": max_k_initial,
+                                "candidates": cached_candidates_by_mode[cache_key_tuple],
+                            },
+                            f,
+                            ensure_ascii=False,
+                        )
+                    logger.info("Saved precompute cache %s", key_hash[:12])
+                except Exception as e:
+                    logger.warning("Cache save failed: %s", e)
 
     rows: list[dict] = []
     for (

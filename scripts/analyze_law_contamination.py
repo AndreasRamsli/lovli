@@ -18,6 +18,7 @@ import hashlib
 import subprocess
 import sys
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
@@ -70,6 +71,23 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(65536), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _contamination_cache_key(
+    questions_sha256: str,
+    git_commit: str,
+    trust_profile: str,
+    profile_version: str,
+    retrieval_k_initial: int,
+    qdrant_collection: str,
+    question_count: int,
+) -> str:
+    """Deterministic cache key for contamination report. Invalidation on any input change."""
+    blob = (
+        f"{questions_sha256}|{git_commit}|{trust_profile}|{profile_version}|"
+        f"{retrieval_k_initial}|{qdrant_collection}|{question_count}"
+    )
+    return hashlib.sha256(blob.encode()).hexdigest()[:24]
 
 
 def load_questions(path: Path) -> list[dict[str, Any]]:
@@ -570,19 +588,87 @@ def main() -> None:
     )
     if args.retrieval_k_initial is not None and args.retrieval_k_initial > 0:
         settings.retrieval_k_initial = args.retrieval_k_initial
-    chain = LegalRAGChain(settings=settings)
+    retrieval_k_initial = settings.retrieval_k_initial
 
     questions = load_questions(args.questions)
-    if args.sample_size > 0:
-        questions = questions[: args.sample_size]
+    sample_size = args.sample_size
+    if sample_size <= 0:
+        raw = os.getenv("CONTAMINATION_SAMPLE_SIZE")
+        if raw:
+            try:
+                sample_size = int(raw)
+            except ValueError:
+                sample_size = 0
+    if sample_size > 0:
+        questions = questions[:sample_size]
+        logger.info("Using sample size: %s (CONTAMINATION_SAMPLE_SIZE)", sample_size)
 
-    logger.info("Analyzing %s questions (retrieval_k_initial=%s)", len(questions), settings.retrieval_k_initial)
+    cache_dir_raw = os.getenv("CONTAMINATION_CACHE_DIR")
+    cache_dir = Path(cache_dir_raw) if cache_dir_raw and cache_dir_raw.strip() else None
+    key_hash = _contamination_cache_key(
+        questions_sha256, git_commit,
+        settings.trust_profile_name, settings.trust_profile_version,
+        retrieval_k_initial, settings.qdrant_collection_name,
+        len(questions),
+    )
+    cache_path = cache_dir / f"contamination_report_{key_hash}.json" if cache_dir else None
+    if cache_path and cache_path.exists():
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                cached = json.load(f)
+            meta = cached.get("artifact_metadata") or {}
+            if (
+                meta.get("questions_sha256") == questions_sha256
+                and meta.get("git_commit") == git_commit
+                and meta.get("question_count") == len(questions)
+            ):
+                args.output.parent.mkdir(parents=True, exist_ok=True)
+                with open(args.output, "w", encoding="utf-8") as f:
+                    json.dump(cached, f, ensure_ascii=False, indent=2)
+                agg = cached.get("aggregate", {})
+                logger.info("Loaded contamination report from cache %s", key_hash[:12])
+                logger.info(
+                    "Contamination rate=%.1f%%, singleton_foreign_rate=%.1f%%, unexpected_citation_rate=%.1f%%",
+                    agg.get("contamination_rate", 0) * 100,
+                    agg.get("singleton_foreign_rate", 0) * 100,
+                    agg.get("unexpected_citation_rate", 0) * 100,
+                )
+                return
+        except Exception as e:
+            logger.warning("Contamination cache load failed: %s", e)
 
-    rows: list[dict[str, Any]] = []
-    for idx, row in enumerate(questions, start=1):
-        rows.append(analyze_question(chain, row, retrieval_k_initial=settings.retrieval_k_initial))
-        if idx % 10 == 0 or idx == len(questions):
-            logger.info("Processed %s/%s questions", idx, len(questions))
+    chain = LegalRAGChain(settings=settings)
+    logger.info("Analyzing %s questions (retrieval_k_initial=%s)", len(questions), retrieval_k_initial)
+
+    workers_raw = os.getenv("CONTAMINATION_PARALLEL_WORKERS", "0").strip()
+    try:
+        parallel_workers = max(0, int(workers_raw))
+    except ValueError:
+        parallel_workers = 0
+
+    retrieval_k = retrieval_k_initial
+    if parallel_workers > 0:
+        rows = [None] * len(questions)
+        with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
+            future_to_idx = {
+                executor.submit(
+                    analyze_question, chain, row, retrieval_k_initial=retrieval_k
+                ): idx
+                for idx, row in enumerate(questions)
+            }
+            done = 0
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                rows[idx] = future.result()
+                done += 1
+                if done % 10 == 0 or done == len(questions):
+                    logger.info("Processed %s/%s questions", done, len(questions))
+    else:
+        rows = []
+        for idx, row in enumerate(questions, start=1):
+            rows.append(analyze_question(chain, row, retrieval_k_initial=retrieval_k))
+            if idx % 10 == 0 or idx == len(questions):
+                logger.info("Processed %s/%s questions", idx, len(questions))
 
     aggregate = summarize(rows)
     hard_cluster_summary = build_hard_cluster_summary(rows)
@@ -620,6 +706,15 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with open(args.output, "w", encoding="utf-8") as handle:
         json.dump(report, handle, ensure_ascii=False, indent=2)
+
+    if cache_path:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(report, f, ensure_ascii=False, indent=2)
+            logger.info("Saved contamination cache %s", key_hash[:12])
+        except Exception as e:
+            logger.warning("Contamination cache save failed: %s", e)
 
     logger.info("Saved contamination report to %s", args.output)
     logger.info(
