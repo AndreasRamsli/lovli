@@ -330,6 +330,12 @@ Kontekst fra lovtekster:
                 for keyword in chapter_keywords[:20]
                 if isinstance(keyword, str) and _normalize_keyword_term(keyword)
             )
+            routing_title_text = " ".join(
+                part for part in [title, short_name, law_ref] if part
+            )
+            routing_summary_text = " ".join(
+                part for part in [summary, legal_area, chapter_titles_text, chapter_keywords_text] if part
+            )
             routing_text = " ".join(
                 part
                 for part in [
@@ -348,6 +354,8 @@ Kontekst fra lovtekster:
                     "law_id": law_id,
                     "law_title": title,
                     "law_short_name": short_name,
+                    "routing_title_text": routing_title_text,
+                    "routing_summary_text": routing_summary_text,
                     "routing_text": routing_text,
                     "routing_tokens": _tokenize_for_routing(routing_text),
                     "chapter_keywords": chapter_keywords,
@@ -409,13 +417,27 @@ Kontekst fra lovtekster:
                 candidate["law_reranker_score"] = None
             return candidates
 
-        pairs = [
+        dualpass_enabled = bool(self.settings.law_routing_summary_dualpass_enabled)
+        fulltext_pairs = [
             [query, candidate.get("routing_text", "") or candidate.get("law_title", "")]
             for candidate in candidates
         ]
+        summary_pairs = [
+            [query, candidate.get("routing_summary_text", "") or candidate.get("routing_text", "")]
+            for candidate in candidates
+        ]
+        title_pairs = [
+            [query, candidate.get("routing_title_text", "") or candidate.get("law_title", "")]
+            for candidate in candidates
+        ]
         try:
-            raw_scores = self.reranker.predict(pairs)
+            raw_scores = self.reranker.predict(fulltext_pairs)
             law_scores = normalize_sigmoid_scores(raw_scores)
+            summary_scores = None
+            title_scores = None
+            if dualpass_enabled:
+                summary_scores = normalize_sigmoid_scores(self.reranker.predict(summary_pairs))
+                title_scores = normalize_sigmoid_scores(self.reranker.predict(title_pairs))
         except Exception as exc:
             logger.warning("Law-level reranker scoring failed; falling back to lexical routing (%s)", exc)
             for candidate in candidates:
@@ -423,9 +445,37 @@ Kontekst fra lovtekster:
             return candidates
 
         reranked = []
-        for candidate, score in zip(candidates, law_scores):
+        summary_w = max(0.0, float(self.settings.law_routing_dualpass_summary_weight))
+        title_w = max(0.0, float(self.settings.law_routing_dualpass_title_weight))
+        fulltext_w = max(0.0, float(self.settings.law_routing_dualpass_fulltext_weight))
+        total_w = summary_w + title_w + fulltext_w
+        if total_w <= 0:
+            summary_w, title_w, fulltext_w = 0.45, 0.35, 0.20
+            total_w = 1.0
+        summary_w /= total_w
+        title_w /= total_w
+        fulltext_w /= total_w
+
+        for idx, (candidate, score) in enumerate(zip(candidates, law_scores)):
             item = dict(candidate)
-            item["law_reranker_score"] = score
+            blended_score = score
+            if dualpass_enabled and summary_scores is not None and title_scores is not None:
+                blended_score = (
+                    (fulltext_w * float(score))
+                    + (summary_w * float(summary_scores[idx]))
+                    + (title_w * float(title_scores[idx]))
+                )
+                item["law_reranker_score_components"] = {
+                    "fulltext": float(score),
+                    "summary": float(summary_scores[idx]),
+                    "title": float(title_scores[idx]),
+                    "weights": {
+                        "fulltext": fulltext_w,
+                        "summary": summary_w,
+                        "title": title_w,
+                    },
+                }
+            item["law_reranker_score"] = blended_score
             reranked.append(item)
 
         # Direct law mentions are trusted strongly: keep them high.
@@ -766,6 +816,43 @@ Kontekst fra lovtekster:
             return docs, scores
         return docs, []
 
+    def _build_reranker_document_text(self, doc: Any) -> str:
+        """Build reranker text with optional metadata prefix for better disambiguation."""
+        base_content = doc.page_content if hasattr(doc, "page_content") else str(doc)
+        if not self.settings.reranker_context_enrichment_enabled:
+            return base_content
+
+        metadata = doc.metadata if hasattr(doc, "metadata") else {}
+        if not isinstance(metadata, dict):
+            return base_content
+
+        law_short_name = (metadata.get("law_short_name") or "").strip()
+        law_title = (metadata.get("law_title") or "").strip()
+        provision_title = (metadata.get("title") or "").strip()
+        chapter_title = (metadata.get("chapter_title") or "").strip()
+        article_id = (metadata.get("article_id") or "").strip()
+
+        prefix_parts: list[str] = []
+        if law_short_name:
+            prefix_parts.append(f"Lov kortnavn: {law_short_name}")
+        elif law_title:
+            prefix_parts.append(f"Lov: {law_title}")
+        if provision_title and provision_title.lower() != law_title.lower():
+            prefix_parts.append(f"Tittel: {provision_title}")
+        if chapter_title:
+            prefix_parts.append(f"Kapittel: {chapter_title}")
+        if article_id:
+            prefix_parts.append(f"ID: {article_id}")
+
+        if not prefix_parts:
+            return base_content
+
+        prefix = " | ".join(prefix_parts)
+        max_prefix_chars = max(40, int(self.settings.reranker_context_max_prefix_chars))
+        if len(prefix) > max_prefix_chars:
+            prefix = prefix[: max_prefix_chars - 1].rstrip() + "..."
+        return f"{prefix}\n\n{base_content}"
+
     def _rerank(self, query: str, docs: list, top_k: int | None = None) -> Tuple[list, list[float]]:
         """
         Rerank retrieved documents using cross-encoder reranker.
@@ -786,7 +873,7 @@ Kontekst fra lovtekster:
 
         # Prepare query-document pairs for reranking
         pairs = [
-            [query, doc.page_content if hasattr(doc, "page_content") else str(doc)]
+            [query, self._build_reranker_document_text(doc)]
             for doc in docs
         ]
 
@@ -937,7 +1024,11 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             )
             if top_score is not None and second_score is not None:
                 score_gap = top_score - second_score
-                score_mode = "reranker"
+                score_mode = (
+                    "reranker_dualpass"
+                    if self.settings.law_routing_summary_dualpass_enabled
+                    else "reranker"
+                )
 
         def _is_uncertain(candidates: list[dict[str, Any]]) -> bool:
             if not candidates or not self.reranker:
@@ -1011,6 +1102,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
         uncertainty_triggered = bool(fallback_mode and fallback_mode.startswith("uncertainty"))
         routing_confidence = {
             "mode": score_mode,
+            "dualpass_enabled": bool(self.settings.law_routing_summary_dualpass_enabled),
             "min_confidence": min_confidence,
             "top_score": top_score,
             "second_score": second_score,
@@ -1165,10 +1257,15 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
                 return True, "uncertain_no_stage1_scores"
             return False, "accepted_no_scores"
         top_doc_score = float(scores[0])
+        mean_doc_score = float(sum(scores) / len(scores)) if scores else 0.0
         stage1_quality["stage1_top_doc_score"] = top_doc_score
+        stage1_quality["stage1_mean_doc_score"] = mean_doc_score
         min_top_score = float(self.settings.law_routing_stage1_min_top_score)
+        min_mean_score = float(self.settings.law_routing_stage1_min_mean_score)
         if top_doc_score < min_top_score:
             return True, "low_stage1_top_doc_score"
+        if mean_doc_score < min_mean_score:
+            return True, "low_stage1_mean_doc_score"
 
         uncertainty_min_gap = float(self.settings.law_routing_uncertainty_min_gap)
         uncertainty_ceiling = float(self.settings.law_routing_uncertainty_top_score_ceiling)
@@ -1176,7 +1273,11 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
         weak_gap = score_gap is None or float(score_gap) < max(0.01, uncertainty_min_gap * 0.80)
         diffuse_routing = routing_concentration is not None and float(routing_concentration) < 0.45
         if is_uncertain and weak_top and (weak_gap or diffuse_routing):
-            if len(stage1_law_ids) > 1 or top_doc_score < (min_top_score + 0.12):
+            if (
+                len(stage1_law_ids) > 1
+                or top_doc_score < (min_top_score + 0.12)
+                or mean_doc_score < (min_mean_score + 0.08)
+            ):
                 return True, "uncertain_diffuse_stage1_escalation"
         return False, "accepted"
 

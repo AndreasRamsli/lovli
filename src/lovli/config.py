@@ -49,6 +49,22 @@ class Settings(BaseSettings):
         default=1024,
         description="Embedding vector dimension (BGE-M3 uses 1024)",
     )
+    index_summary_augmentation_enabled: bool = Field(
+        default=False,
+        description="Enable index-time summary augmentation (prepends law-level context to provision text).",
+    )
+    index_summary_catalog_path: str = Field(
+        default="data/law_catalog.json",
+        description="Path to law catalog JSON for index-time summary augmentation lookup.",
+    )
+    index_summary_separator: str = Field(
+        default="\n\n[LAW_CONTEXT]\n",
+        description="Separator inserted between summary prefix and provision text during index augmentation.",
+    )
+    index_store_raw_augmented_payload: bool = Field(
+        default=True,
+        description="Store both raw and augmented content variants in Qdrant payload for offline diagnostics.",
+    )
 
     # LLM Configuration (via OpenRouter)
     llm_model: str = Field(
@@ -92,6 +108,16 @@ class Settings(BaseSettings):
     reranker_enabled: bool = Field(
         default=True,
         description="Enable cross-encoder reranking",
+    )
+    reranker_context_enrichment_enabled: bool = Field(
+        default=True,
+        description="Prepend lightweight metadata context (law name/title/chapter) to reranker document text.",
+    )
+    reranker_context_max_prefix_chars: int = Field(
+        default=300,
+        ge=80,
+        le=1200,
+        description="Maximum prefix length for metadata context prepended to reranker text.",
     )
     reranker_confidence_threshold: float = Field(
         default=0.45,
@@ -175,6 +201,28 @@ class Settings(BaseSettings):
         le=20,
         description="Number of top laws to keep after law-level reranker scoring.",
     )
+    law_routing_summary_dualpass_enabled: bool = Field(
+        default=False,
+        description="Score law summary and title/name as separate reranker passages and blend scores.",
+    )
+    law_routing_dualpass_summary_weight: float = Field(
+        default=0.45,
+        ge=0.0,
+        le=1.0,
+        description="Blend weight for summary-specific law reranker score in dual-pass mode.",
+    )
+    law_routing_dualpass_title_weight: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=1.0,
+        description="Blend weight for title/name law reranker score in dual-pass mode.",
+    )
+    law_routing_dualpass_fulltext_weight: float = Field(
+        default=0.20,
+        ge=0.0,
+        le=1.0,
+        description="Blend weight for full routing-text law reranker score in dual-pass mode.",
+    )
     law_routing_min_confidence: float = Field(
         default=0.30,
         ge=0.0,
@@ -220,6 +268,12 @@ class Settings(BaseSettings):
         ge=0.0,
         le=1.0,
         description="Minimum top reranker score required before accepting stage-1 broadened fallback results.",
+    )
+    law_routing_stage1_min_mean_score: float = Field(
+        default=0.26,
+        ge=0.0,
+        le=1.0,
+        description="Minimum mean reranker score across top stage-1 docs before accepting stage-1 fallback results.",
     )
     law_routing_min_token_overlap: int = Field(
         default=1,

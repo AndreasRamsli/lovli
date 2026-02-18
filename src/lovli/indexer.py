@@ -1,8 +1,10 @@
 """Vector indexing module for storing legal articles in Qdrant."""
 
 import hashlib
+import json
 import logging
 from typing import Iterator
+from pathlib import Path
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, SparseVectorParams, PointStruct
 from sentence_transformers import SentenceTransformer
@@ -11,6 +13,7 @@ from .config import Settings
 from .parser import LegalArticle
 
 logger = logging.getLogger(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _build_point_key(article: LegalArticle) -> str:
@@ -121,6 +124,13 @@ class LegalIndexer:
 
         # Track actual sparse support based on what we loaded
         self._has_sparse = self._use_native_api
+        self._summary_by_law_id: dict[str, str] = {}
+        if self.settings.index_summary_augmentation_enabled:
+            self._summary_by_law_id = self._load_law_summary_map()
+            logger.info(
+                "Index-time summary augmentation enabled: loaded %s law summaries",
+                len(self._summary_by_law_id),
+            )
 
     def collection_exists(self, collection_name: str | None = None) -> bool:
         """
@@ -274,7 +284,9 @@ class LegalIndexer:
             raise RuntimeError(f"Indexing failed: {e}") from e
 
     def _process_batch(self, batch: list[LegalArticle]) -> int:
-        texts = [article.content for article in batch]
+        raw_texts = [article.content for article in batch]
+        augmented_texts = [self._build_augmented_content(article) for article in batch]
+        texts = augmented_texts
         dense_embeddings = []
         sparse_embeddings = []
 
@@ -330,7 +342,7 @@ class LegalIndexer:
                 id=point_id,
                 vector=vectors,
                 payload={
-                    "page_content": article.content,
+                    "page_content": augmented_texts[idx],
                     "metadata": {
                         "article_id": article.article_id,
                         "title": article.title,
@@ -345,6 +357,14 @@ class LegalIndexer:
                         "cross_references": article.cross_references or [],
                         "url": article.url,
                     },
+                    **(
+                        {
+                            "content_raw": raw_texts[idx],
+                            "content_augmented": augmented_texts[idx],
+                        }
+                        if self.settings.index_store_raw_augmented_payload
+                        else {}
+                    ),
                 },
             )
             points.append(point)
@@ -354,6 +374,45 @@ class LegalIndexer:
             points=points,
         )
         return len(points)
+
+    def _load_law_summary_map(self) -> dict[str, str]:
+        """Load law-level summary lookup table from the configured catalog."""
+        catalog_path = Path(self.settings.index_summary_catalog_path)
+        if not catalog_path.is_absolute():
+            catalog_path = (PROJECT_ROOT / catalog_path).resolve()
+        if not catalog_path.exists():
+            logger.warning(
+                "Summary augmentation catalog not found at %s; proceeding without summaries.",
+                catalog_path,
+            )
+            return {}
+        try:
+            with open(catalog_path, "r", encoding="utf-8") as handle:
+                rows = json.load(handle)
+        except Exception as exc:
+            logger.warning("Failed loading summary catalog %s: %s", catalog_path, exc)
+            return {}
+
+        summary_by_law_id: dict[str, str] = {}
+        for row in rows:
+            law_id = (row.get("law_id") or "").strip()
+            summary = (row.get("summary") or "").strip()
+            if law_id and summary:
+                summary_by_law_id[law_id] = summary
+        return summary_by_law_id
+
+    def _build_augmented_content(self, article: LegalArticle) -> str:
+        """Build embedding text with optional law-level summary prefix."""
+        raw_content = article.content or ""
+        if not self.settings.index_summary_augmentation_enabled:
+            return raw_content
+        summary = (self._summary_by_law_id.get(article.law_id) or "").strip()
+        if not summary:
+            summary = (article.law_short_name or article.law_title or "").strip()
+        if not summary:
+            return raw_content
+        separator = self.settings.index_summary_separator or "\n\n[LAW_CONTEXT]\n"
+        return f"{summary}{separator}{raw_content}"
 
     @staticmethod
     def _convert_sparse_vector(sparse_vec, article_id: str) -> dict | None:

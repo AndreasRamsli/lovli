@@ -55,6 +55,22 @@ def matches_expected(cited_id: str, expected_set: set[str]) -> bool:
     return any(cited_id.startswith(exp) for exp in expected_set)
 
 
+def _safe_div(numerator: float, denominator: float, default: float = 0.0) -> float:
+    """Safely divide two numbers with configurable default."""
+    return (numerator / denominator) if denominator else default
+
+
+def _article_family(article_id: str) -> str:
+    """Normalize nested article IDs to a paragraph-family key."""
+    token = (article_id or "").strip()
+    if not token:
+        return ""
+    for marker in ("-ledd-", "-nummer-", "-punkt-"):
+        if marker in token:
+            return token.split(marker)[0]
+    return token
+
+
 def load_questions(path: Path) -> list[dict]:
     questions: list[dict] = []
     with open(path, "r", encoding="utf-8") as f:
@@ -132,19 +148,22 @@ def _compute_balanced_score(metrics: dict) -> float:
     Weights prioritize answer quality while still penalizing contamination/noise.
     """
     accuracy_component = (
-        (0.30 * metrics.get("recall_at_k", 0.0))
-        + (0.20 * metrics.get("mean_expected_coverage", 0.0))
-        + (0.15 * metrics.get("citation_precision", 0.0))
+        (0.16 * metrics.get("recall_at_k", 0.0))
+        + (0.20 * metrics.get("coverage_weighted_positive_recall", 0.0))
+        + (0.14 * metrics.get("mean_expected_coverage", 0.0))
+        + (0.10 * metrics.get("citation_precision", 0.0))
+        + (0.05 * metrics.get("multi_article_recall_at_k", 0.0))
     )
     abstention_component = (
-        (0.20 * metrics.get("negative_success", 0.0))
-        + (0.10 * metrics.get("negative_offtopic_legal_success", 0.0))
+        (0.17 * metrics.get("negative_success", 0.0))
+        + (0.08 * metrics.get("negative_offtopic_legal_success", 0.0))
         + (0.05 * metrics.get("negative_offtopic_nonlegal_success", 0.0))
     )
     penalties = (
         (0.08 * metrics.get("law_contamination_rate", 0.0))
         + (0.07 * metrics.get("unexpected_citation_rate", 0.0))
         + (0.10 * metrics.get("false_positive_gating_rate", 0.0))
+        + (0.05 * metrics.get("source_boundary_mismatch_at_k", 0.0))
     )
     return accuracy_component + abstention_component - penalties
 
@@ -238,7 +257,7 @@ def precompute_candidates(
         candidates: list[dict] = []
         if docs:
             pairs = [
-                [query, doc.page_content if hasattr(doc, "page_content") else str(doc)]
+                [query, chain._build_reranker_document_text(doc)]
                 for doc in docs
             ]
             raw_scores = chain.reranker.predict(pairs) if chain.reranker else [1.0] * len(docs)
@@ -328,6 +347,15 @@ def evaluate_combo(
     positive_total = 0
     weighted_positive_recall_numerator = 0.0
     weighted_positive_recall_denominator = 0.0
+    recall_at_1_hits = 0
+    recall_at_3_hits = 0
+    recall_at_5_hits = 0
+    reciprocal_rank_sum = 0.0
+    mrr_count = 0
+    boundary_items_total = 0
+    boundary_wrong_law_count = 0
+    boundary_wrong_article_same_law_count = 0
+    boundary_family_proxy_count = 0
     top_scores: list[float] = []
     routing_uncertain_count = 0
     fallback_stage1_accepted_count = 0
@@ -472,6 +500,73 @@ def evaluate_combo(
         if expected:
             retrieval_total += 1
             positive_total += 1
+            expected_law_ids = set()
+            expected_article_ids = set()
+            if expected_sources:
+                expected_law_ids = {
+                    (item.get("law_id") or "").strip()
+                    for item in expected_sources
+                    if (item.get("law_id") or "").strip()
+                }
+                expected_article_ids = {
+                    (item.get("article_id") or "").strip()
+                    for item in expected_sources
+                    if (item.get("article_id") or "").strip()
+                }
+            else:
+                expected_article_ids = {item.strip() for item in expected if item and item.strip()}
+
+            # Rank-sensitive retrieval metrics on post-filter top-k.
+            def _is_relevant_at_position(cited_source: dict[str, str]) -> bool:
+                if expected_sources:
+                    return any(
+                        matches_expected_source(cited_source, exp)
+                        for exp in expected_sources
+                    )
+                cited_article = (cited_source.get("article_id") or "").strip()
+                return any(cited_article.startswith(exp_id) for exp_id in expected_article_ids)
+
+            hit_at_1 = False
+            hit_at_3 = False
+            hit_at_5 = False
+            first_relevant_rank = None
+            for rank_idx, cited_source in enumerate(cited_sources, start=1):
+                relevant = _is_relevant_at_position(cited_source)
+                if relevant:
+                    if first_relevant_rank is None:
+                        first_relevant_rank = rank_idx
+                    if rank_idx <= 1:
+                        hit_at_1 = True
+                    if rank_idx <= 3:
+                        hit_at_3 = True
+                    if rank_idx <= 5:
+                        hit_at_5 = True
+            recall_at_1_hits += int(hit_at_1)
+            recall_at_3_hits += int(hit_at_3)
+            recall_at_5_hits += int(hit_at_5)
+            mrr_count += 1
+            if first_relevant_rank is not None and first_relevant_rank <= 5:
+                reciprocal_rank_sum += 1.0 / first_relevant_rank
+
+            # DRM-analog boundary diagnostics across retrieved items.
+            expected_family_ids = {_article_family(item) for item in expected_article_ids if item}
+            for cited in cited_sources:
+                cited_law = (cited.get("law_id") or "").strip()
+                cited_article = (cited.get("article_id") or "").strip()
+                if not cited_article:
+                    continue
+                boundary_items_total += 1
+                law_matches = (not expected_law_ids) or (cited_law in expected_law_ids)
+                source_matches = _is_relevant_at_position(cited)
+                if not law_matches:
+                    boundary_wrong_law_count += 1
+                    continue
+                if source_matches:
+                    continue
+                boundary_wrong_article_same_law_count += 1
+                if _article_family(cited_article) in expected_family_ids:
+                    boundary_family_proxy_count += 1
+
             if expected_sources:
                 matched_expected_pairs = set()
                 matched_citations = 0
@@ -694,6 +789,29 @@ def evaluate_combo(
         if weighted_positive_recall_denominator
         else 0.0
     )
+    recall_at_1 = _safe_div(recall_at_1_hits, positive_total)
+    recall_at_3 = _safe_div(recall_at_3_hits, positive_total)
+    recall_at_5 = _safe_div(recall_at_5_hits, positive_total)
+    mrr_at_5 = _safe_div(reciprocal_rank_sum, mrr_count)
+    f1_at_k = _safe_div(
+        2.0 * citation_precision * recall_at_k,
+        citation_precision + recall_at_k,
+    )
+    f1_weighted_at_k = _safe_div(
+        2.0 * citation_precision * coverage_weighted_positive_recall,
+        citation_precision + coverage_weighted_positive_recall,
+    )
+    source_boundary_mismatch_at_k = _safe_div(
+        boundary_wrong_law_count + boundary_wrong_article_same_law_count,
+        boundary_items_total,
+    )
+    boundary_level_a_wrong_law_rate = _safe_div(boundary_wrong_law_count, boundary_items_total)
+    boundary_level_b_wrong_article_same_law_rate = _safe_div(
+        boundary_wrong_article_same_law_count, boundary_items_total
+    )
+    boundary_level_c_family_proxy_rate = _safe_div(
+        boundary_family_proxy_count, boundary_items_total
+    )
     confidence_threshold_crossing_rate = (
         confidence_threshold_crossings / scored_query_count if scored_query_count else 0.0
     )
@@ -737,8 +855,18 @@ def evaluate_combo(
         "core_negative_offtopic_nonlegal_success": core_negative_offtopic_nonlegal_success,
         "mean_expected_coverage": mean_expected_coverage,
         "citation_precision": citation_precision,
+        "f1_at_k": f1_at_k,
+        "f1_weighted_at_k": f1_weighted_at_k,
+        "mrr_at_5": mrr_at_5,
+        "recall_at_1": recall_at_1,
+        "recall_at_3": recall_at_3,
+        "recall_at_5": recall_at_5,
         "unexpected_citation_rate": unexpected_citation_rate,
         "law_contamination_rate": law_contamination_rate,
+        "source_boundary_mismatch_at_k": source_boundary_mismatch_at_k,
+        "boundary_level_a_wrong_law_rate": boundary_level_a_wrong_law_rate,
+        "boundary_level_b_wrong_article_same_law_rate": boundary_level_b_wrong_article_same_law_rate,
+        "boundary_level_c_family_proxy_rate": boundary_level_c_family_proxy_rate,
         "law_coherence_filtered_count": law_coherence_filtered_count,
         "min_sources_floor_trigger_count": min_sources_floor_trigger_count,
         "confidence_gating_count": confidence_gating_count,
@@ -774,6 +902,8 @@ def apply_combo_to_chain(
     min_gap: float,
     top_score_ceiling: float,
     routing_fallback_unfiltered: bool,
+    reranker_context_enrichment: bool,
+    routing_summary_dualpass: bool,
 ) -> None:
     """Apply sweep parameters to an existing chain instance."""
     chain.settings.retrieval_k_initial = retrieval_k_initial
@@ -783,6 +913,8 @@ def apply_combo_to_chain(
     chain.settings.reranker_ambiguity_min_gap = min_gap
     chain.settings.reranker_ambiguity_top_score_ceiling = top_score_ceiling
     chain.settings.law_routing_fallback_unfiltered = routing_fallback_unfiltered
+    chain.settings.reranker_context_enrichment_enabled = reranker_context_enrichment
+    chain.settings.law_routing_summary_dualpass_enabled = routing_summary_dualpass
 
 
 def main() -> None:
@@ -826,6 +958,8 @@ def main() -> None:
         "reranker_ambiguity_min_gap": settings.reranker_ambiguity_min_gap,
         "reranker_ambiguity_top_score_ceiling": settings.reranker_ambiguity_top_score_ceiling,
         "law_routing_fallback_unfiltered": settings.law_routing_fallback_unfiltered,
+        "reranker_context_enrichment_enabled": settings.reranker_context_enrichment_enabled,
+        "law_routing_summary_dualpass_enabled": settings.law_routing_summary_dualpass_enabled,
         "law_coherence_dominant_concentration_threshold": settings.law_coherence_dominant_concentration_threshold,
         "law_routing_stage1_min_docs": settings.law_routing_stage1_min_docs,
         "law_routing_stage1_min_top_score": settings.law_routing_stage1_min_top_score,
@@ -851,12 +985,21 @@ def main() -> None:
     if bool(settings.law_routing_fallback_unfiltered) not in routing_fallback_unfiltered_values:
         routing_fallback_unfiltered_values.append(bool(settings.law_routing_fallback_unfiltered))
     routing_fallback_unfiltered_values = sorted(set(routing_fallback_unfiltered_values), reverse=True)
+    reranker_context_enrichment_values = [True, False]
+    if bool(settings.reranker_context_enrichment_enabled) not in reranker_context_enrichment_values:
+        reranker_context_enrichment_values.append(bool(settings.reranker_context_enrichment_enabled))
+    reranker_context_enrichment_values = sorted(set(reranker_context_enrichment_values), reverse=True)
+    routing_summary_dualpass_values = [False, True]
+    if bool(settings.law_routing_summary_dualpass_enabled) not in routing_summary_dualpass_values:
+        routing_summary_dualpass_values.append(bool(settings.law_routing_summary_dualpass_enabled))
+    routing_summary_dualpass_values = sorted(set(routing_summary_dualpass_values), reverse=True)
 
     logger.info("Loaded %s questions", len(questions))
     core_count = sum(1 for row in questions if row.get("id") in CORE_QUESTION_IDS)
     logger.info("Frozen core subset size: %s", core_count)
     logger.info(
-        "Sweep grid values: k_init=%s k=%s conf=%s min_doc=%s min_gap=%s top_ceiling=%s route_unfiltered=%s",
+        "Sweep grid values: k_init=%s k=%s conf=%s min_doc=%s min_gap=%s top_ceiling=%s "
+        "route_unfiltered=%s reranker_ctx=%s dualpass=%s",
         retrieval_k_initial_values,
         retrieval_k_values,
         confidence_values,
@@ -864,21 +1007,32 @@ def main() -> None:
         min_gap_values,
         top_score_ceiling_values,
         routing_fallback_unfiltered_values,
+        reranker_context_enrichment_values,
+        routing_summary_dualpass_values,
     )
     logger.info("Starting retrieval sweep...")
     chain = LegalRAGChain(settings=settings)
     skip_index_scan = _env_flag("SWEEP_SKIP_INDEX_SCAN", default=True)
     validate_questions(questions, chain, skip_index_scan=skip_index_scan)
     max_k_initial = max(retrieval_k_initial_values)
-    cached_candidates_by_fallback: dict[bool, list[dict]] = {}
-    for fallback_unfiltered in routing_fallback_unfiltered_values:
+    cached_candidates_by_mode: dict[tuple[bool, bool, bool], list[dict]] = {}
+    for fallback_unfiltered, reranker_ctx_enabled, dualpass_enabled in itertools.product(
+        routing_fallback_unfiltered_values,
+        reranker_context_enrichment_values,
+        routing_summary_dualpass_values,
+    ):
         chain.settings.law_routing_fallback_unfiltered = fallback_unfiltered
+        chain.settings.reranker_context_enrichment_enabled = reranker_ctx_enabled
+        chain.settings.law_routing_summary_dualpass_enabled = dualpass_enabled
+        cache_key = (fallback_unfiltered, reranker_ctx_enabled, dualpass_enabled)
         logger.info(
-            "Precomputing candidates with k=%s (routing_fallback_unfiltered=%s)...",
+            "Precomputing candidates with k=%s (route_unfiltered=%s reranker_ctx=%s dualpass=%s)...",
             max_k_initial,
             fallback_unfiltered,
+            reranker_ctx_enabled,
+            dualpass_enabled,
         )
-        cached_candidates_by_fallback[fallback_unfiltered] = precompute_candidates(
+        cached_candidates_by_mode[cache_key] = precompute_candidates(
             chain, questions, max_k_initial=max_k_initial
         )
 
@@ -891,6 +1045,8 @@ def main() -> None:
         min_gap,
         top_score_ceiling,
         routing_fallback_unfiltered,
+        reranker_context_enrichment,
+        routing_summary_dualpass,
     ) in itertools.product(
         retrieval_k_initial_values,
         retrieval_k_values,
@@ -899,6 +1055,8 @@ def main() -> None:
         min_gap_values,
         top_score_ceiling_values,
         routing_fallback_unfiltered_values,
+        reranker_context_enrichment_values,
+        routing_summary_dualpass_values,
     ):
         apply_combo_to_chain(
             chain,
@@ -909,10 +1067,14 @@ def main() -> None:
             min_gap,
             top_score_ceiling,
             routing_fallback_unfiltered,
+            reranker_context_enrichment,
+            routing_summary_dualpass,
         )
         metrics = evaluate_combo(
             chain,
-            cached_candidates_by_fallback[routing_fallback_unfiltered],
+            cached_candidates_by_mode[
+                (routing_fallback_unfiltered, reranker_context_enrichment, routing_summary_dualpass)
+            ],
             retrieval_k_initial=retrieval_k_initial,
             confidence_threshold=confidence,
             min_doc_score=min_doc,
@@ -935,6 +1097,8 @@ def main() -> None:
             "reranker_ambiguity_min_gap": min_gap,
             "reranker_ambiguity_top_score_ceiling": top_score_ceiling,
             "law_routing_fallback_unfiltered": routing_fallback_unfiltered,
+            "reranker_context_enrichment_enabled": reranker_context_enrichment,
+            "law_routing_summary_dualpass_enabled": routing_summary_dualpass,
             "law_coherence_dominant_concentration_threshold": (
                 chain.settings.law_coherence_dominant_concentration_threshold
             ),
@@ -946,10 +1110,12 @@ def main() -> None:
         row["is_profile_default_row"] = _is_profile_default_row(row, profile_defaults)
         rows.append(row)
         logger.info(
-            "k_init=%s k=%s conf=%.2f min_doc=%.2f min_gap=%.2f top_ceiling=%.2f route_unfiltered=%s -> "
+            "k_init=%s k=%s conf=%.2f min_doc=%.2f min_gap=%.2f top_ceiling=%.2f "
+            "route_unfiltered=%s reranker_ctx=%s dualpass=%s -> "
             "balanced=%.3f recall=%.3f coverage=%.3f precision=%.3f unexpected=%.3f "
             "law_contam=%.3f coherence_dropped=%s "
-            "fp_gate=%.3f cw_recall=%.3f floor_triggers=%s conf_gate=%s amb_gate=%s "
+            "fp_gate=%.3f cw_recall=%.3f mrr5=%.3f r@1=%.3f r@3=%.3f r@5=%.3f "
+            "boundary_mismatch=%.3f floor_triggers=%s conf_gate=%s amb_gate=%s "
             "uncertain=%s stage2_unfiltered=%s "
             "single=%.3f multi=%.3f neg=%.3f neg_legal=%.3f neg_nonlegal=%.3f "
             "editorial=%.3f non_editorial_clean=%.3f avg_top=%.3f",
@@ -960,6 +1126,8 @@ def main() -> None:
             min_gap,
             top_score_ceiling,
             routing_fallback_unfiltered,
+            reranker_context_enrichment,
+            routing_summary_dualpass,
             metrics["balanced_score"],
             metrics["recall_at_k"],
             metrics["mean_expected_coverage"],
@@ -969,6 +1137,11 @@ def main() -> None:
             metrics["law_coherence_filtered_count"],
             metrics["false_positive_gating_rate"],
             metrics["coverage_weighted_positive_recall"],
+            metrics["mrr_at_5"],
+            metrics["recall_at_1"],
+            metrics["recall_at_3"],
+            metrics["recall_at_5"],
+            metrics["source_boundary_mismatch_at_k"],
             metrics["min_sources_floor_trigger_count"],
             metrics["confidence_gating_count"],
             metrics["ambiguity_gating_count"],
@@ -988,9 +1161,12 @@ def main() -> None:
     rows.sort(
         key=lambda r: (
             r["balanced_score"],
+            r["mrr_at_5"],
+            r["recall_at_1"],
             r["coverage_weighted_positive_recall"],
             r["recall_at_k"],
             r["citation_precision"],
+            -r["source_boundary_mismatch_at_k"],
             -r["law_contamination_rate"],
             -r["false_positive_gating_rate"],
             -r["unexpected_citation_rate"],
@@ -1004,9 +1180,46 @@ def main() -> None:
             f"Expected exactly one profile-default row, found {default_row_count}. "
             "Ensure sweep grid includes active trust profile defaults."
         )
+    default_row = next(row for row in rows if bool(row.get("is_profile_default_row")))
+    improvement_delta = float(os.getenv("SWEEP_PROMOTION_MIN_IMPROVEMENT", "0.01"))
+    precision_tolerance = float(os.getenv("SWEEP_PROMOTION_PRECISION_TOLERANCE", "0.005"))
+    negative_tolerance = float(os.getenv("SWEEP_PROMOTION_NEGATIVE_TOLERANCE", "0.010"))
+    baseline_snapshot = {
+        "source_boundary_mismatch_at_k": float(default_row.get("source_boundary_mismatch_at_k", 0.0)),
+        "mrr_at_5": float(default_row.get("mrr_at_5", 0.0)),
+        "recall_at_5": float(default_row.get("recall_at_5", 0.0)),
+        "citation_precision": float(default_row.get("citation_precision", 0.0)),
+        "negative_success": float(default_row.get("negative_success", 0.0)),
+    }
+    for row in rows:
+        reasons: list[str] = []
+        boundary_gain = baseline_snapshot["source_boundary_mismatch_at_k"] - float(
+            row.get("source_boundary_mismatch_at_k", 0.0)
+        )
+        mrr_gain = float(row.get("mrr_at_5", 0.0)) - baseline_snapshot["mrr_at_5"]
+        recall5_gain = float(row.get("recall_at_5", 0.0)) - baseline_snapshot["recall_at_5"]
+        citation_delta = float(row.get("citation_precision", 0.0)) - baseline_snapshot["citation_precision"]
+        negative_delta = float(row.get("negative_success", 0.0)) - baseline_snapshot["negative_success"]
+
+        if boundary_gain < improvement_delta:
+            reasons.append("insufficient_boundary_mismatch_gain")
+        if mrr_gain < improvement_delta:
+            reasons.append("insufficient_mrr_gain")
+        if recall5_gain < improvement_delta:
+            reasons.append("insufficient_recall5_gain")
+        if citation_delta < (-precision_tolerance):
+            reasons.append("citation_precision_regression")
+        if negative_delta < (-negative_tolerance):
+            reasons.append("negative_success_regression")
+
+        row["promotion_gate_pass"] = len(reasons) == 0
+        row["promotion_gate_reasons"] = reasons
+        row["promotion_gate_baseline"] = baseline_snapshot
+
     out_path = ROOT_DIR / "eval" / "retrieval_sweep_results.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False, indent=2)
+    summary_path = ROOT_DIR / "eval" / "retrieval_sweep_summary.json"
 
     pair_index: dict[tuple, dict[bool, dict]] = {}
     for row in rows:
@@ -1017,16 +1230,21 @@ def main() -> None:
             row.get("reranker_min_doc_score"),
             row.get("reranker_ambiguity_min_gap"),
             row.get("reranker_ambiguity_top_score_ceiling"),
+            row.get("reranker_context_enrichment_enabled"),
+            row.get("law_routing_summary_dualpass_enabled"),
         )
         pair_index.setdefault(key, {})[bool(row.get("law_routing_fallback_unfiltered"))] = row
     compared_pairs = 0
     identical_pairs = 0
     divergence_counts = {
         "recall_at_k": 0,
+        "recall_at_1": 0,
+        "mrr_at_5": 0,
         "citation_precision": 0,
         "unexpected_citation_rate": 0,
         "false_positive_gating_rate": 0,
         "law_contamination_rate": 0,
+        "source_boundary_mismatch_at_k": 0,
         "balanced_score": 0,
     }
     delta_sums = {key: 0.0 for key in divergence_counts}
@@ -1079,9 +1297,41 @@ def main() -> None:
         )
 
     logger.info("Saved results: %s", out_path)
+    promotion_pass_count = sum(1 for row in rows if bool(row.get("promotion_gate_pass")))
+    logger.info(
+        "Promotion gate summary: pass=%s/%s (delta=%.3f precision_tol=%.3f negative_tol=%.3f)",
+        promotion_pass_count,
+        len(rows),
+        improvement_delta,
+        precision_tolerance,
+        negative_tolerance,
+    )
     logger.info("Top 5 configurations:")
     for row in rows[:5]:
         logger.info(row)
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "run_id": run_id,
+                "run_started_at": run_started_at,
+                "git_commit": git_commit,
+                "questions_sha256": questions_sha256,
+                "question_count": len(questions),
+                "rows_count": len(rows),
+                "promotion_gate_pass_count": promotion_pass_count,
+                "promotion_gate_total": len(rows),
+                "promotion_gate_thresholds": {
+                    "improvement_delta": improvement_delta,
+                    "precision_tolerance": precision_tolerance,
+                    "negative_tolerance": negative_tolerance,
+                },
+                "top_configuration": rows[0] if rows else {},
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+    logger.info("Saved ablation summary: %s", summary_path)
 
 
 if __name__ == "__main__":
