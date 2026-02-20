@@ -13,6 +13,7 @@ import os
 import hashlib
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -43,10 +44,42 @@ logger = logging.getLogger(__name__)
 
 # Frozen core subset for stable regressions across tuning runs.
 CORE_QUESTION_IDS = {
-    "q001", "q002", "q003", "q004", "q005", "q006", "q007", "q008", "q009", "q010",
-    "q011", "q012", "q013", "q014", "q015", "q016", "q017", "q018", "q019", "q020",
-    "q021", "q022", "q031", "q036", "q037", "q038", "q039", "q040", "q041", "q042", "q045",
-    "q046", "q047", "q048", "q049", "q050",
+    "q001",
+    "q002",
+    "q003",
+    "q004",
+    "q005",
+    "q006",
+    "q007",
+    "q008",
+    "q009",
+    "q010",
+    "q011",
+    "q012",
+    "q013",
+    "q014",
+    "q015",
+    "q016",
+    "q017",
+    "q018",
+    "q019",
+    "q020",
+    "q021",
+    "q022",
+    "q031",
+    "q036",
+    "q037",
+    "q038",
+    "q039",
+    "q040",
+    "q041",
+    "q042",
+    "q045",
+    "q046",
+    "q047",
+    "q048",
+    "q049",
+    "q050",
 }
 
 
@@ -84,14 +117,11 @@ def load_questions(path: Path) -> list[dict]:
 def _safe_git_commit() -> str:
     """Best-effort current git commit SHA."""
     try:
-        return (
-            subprocess.check_output(
-                ["git", "rev-parse", "HEAD"],
-                cwd=str(ROOT_DIR),
-                text=True,
-            )
-            .strip()
-        )
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(ROOT_DIR),
+            text=True,
+        ).strip()
     except Exception:
         return "unknown"
 
@@ -243,77 +273,119 @@ def _build_routing_alignment_map(routing_diagnostics: dict | None) -> dict[str, 
     return alignment
 
 
+def _process_single_question(
+    chain: LegalRAGChain,
+    row: dict,
+    max_k_initial: int,
+) -> dict:
+    """Process a single question and return cached candidate dict."""
+    query = row["question"]
+    routed_law_ids = chain._route_law_ids(query)
+    route_diag_before = dict(getattr(chain, "_last_routing_diagnostics", {}) or {})
+    docs = chain._invoke_retriever(query, routed_law_ids=routed_law_ids)
+    route_diag_after = dict(
+        getattr(chain, "_last_routing_diagnostics", route_diag_before) or route_diag_before
+    )
+
+    dedup_docs = []
+    seen_keys = set()
+    for doc in docs:
+        metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+        key = (metadata.get("law_id"), metadata.get("article_id"))
+        if metadata.get("article_id") and key not in seen_keys:
+            seen_keys.add(key)
+            dedup_docs.append(doc)
+        elif not metadata.get("article_id"):
+            dedup_docs.append(doc)
+    docs = dedup_docs[:max_k_initial]
+
+    candidates: list[dict] = []
+    if docs:
+        pairs = [[query, chain._build_reranker_document_text(doc)] for doc in docs]
+        raw_scores = chain.reranker.predict(pairs) if chain.reranker else [1.0] * len(docs)
+        normalized = normalize_sigmoid_scores(raw_scores)
+        for doc, score in zip(docs, normalized):
+            metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+            candidates.append(
+                {
+                    "law_id": metadata.get("law_id", ""),
+                    "article_id": metadata.get("article_id", ""),
+                    "chapter_id": metadata.get("chapter_id", ""),
+                    "doc_type": _infer_doc_type(metadata),
+                    "has_editorial_notes": bool(metadata.get("editorial_notes")),
+                    "editorial_notes_count": len(metadata.get("editorial_notes") or []),
+                    "cross_references": metadata.get("cross_references") or [],
+                    "score": score,
+                }
+            )
+
+    return {
+        "id": row.get("id"),
+        "question": query,
+        "expected_articles": row.get("expected_articles", []),
+        "expected_sources": row.get("expected_sources", []),
+        "expects_editorial_context": bool(row.get("expects_editorial_context", False)),
+        "case_type": classify_case_type(row),
+        "negative_type": infer_negative_type(row),
+        "is_core": row.get("id") in CORE_QUESTION_IDS,
+        "routing_is_uncertain": bool(
+            ((route_diag_after.get("routing_confidence") or {}).get("is_uncertain"))
+        ),
+        "routing_alignment_by_law": _build_routing_alignment_map(route_diag_after),
+        "retrieval_fallback_stage": route_diag_after.get("retrieval_fallback_stage"),
+        "retrieval_fallback": route_diag_after.get("retrieval_fallback"),
+        "candidates": candidates,
+    }
+
+
 def precompute_candidates(
     chain: LegalRAGChain,
     questions: list[dict],
     max_k_initial: int,
+    parallel: bool = False,
+    max_workers: int = 4,
 ) -> list[dict]:
-    """Run retrieval/reranker once per question and cache candidates for offline sweeping."""
+    """Run retrieval/reranker once per question and cache candidates for offline sweeping.
+
+    Args:
+        chain: LegalRAGChain instance
+        questions: List of question dicts
+        max_k_initial: Maximum initial retrieval k
+        parallel: If True, use parallel processing (requires fresh chain per thread)
+        max_workers: Number of parallel workers (default 4)
+    """
     chain.retriever = chain.vectorstore.as_retriever(search_kwargs={"k": max_k_initial})
-    cached: list[dict] = []
-    for row in questions:
-        query = row["question"]
-        routed_law_ids = chain._route_law_ids(query)
-        route_diag_before = dict(getattr(chain, "_last_routing_diagnostics", {}) or {})
-        docs = chain._invoke_retriever(query, routed_law_ids=routed_law_ids)
-        route_diag_after = dict(getattr(chain, "_last_routing_diagnostics", route_diag_before) or route_diag_before)
 
-        # Deduplicate like retrieve()
-        dedup_docs = []
-        seen_keys = set()
-        for doc in docs:
-            metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
-            key = (metadata.get("law_id"), metadata.get("article_id"))
-            if metadata.get("article_id") and key not in seen_keys:
-                seen_keys.add(key)
-                dedup_docs.append(doc)
-            elif not metadata.get("article_id"):
-                dedup_docs.append(doc)
-        docs = dedup_docs[:max_k_initial]
+    if parallel:
+        logger.info("Using parallel precomputation with %d workers", max_workers)
+        cached: list[dict | None] = [None] * len(questions)
 
-        candidates: list[dict] = []
-        if docs:
-            pairs = [
-                [query, chain._build_reranker_document_text(doc)]
-                for doc in docs
-            ]
-            raw_scores = chain.reranker.predict(pairs) if chain.reranker else [1.0] * len(docs)
-            normalized = normalize_sigmoid_scores(raw_scores)
-            for doc, score in zip(docs, normalized):
-                metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
-                candidates.append(
-                    {
-                        "law_id": metadata.get("law_id", ""),
-                        "article_id": metadata.get("article_id", ""),
-                        "chapter_id": metadata.get("chapter_id", ""),
-                        "doc_type": _infer_doc_type(metadata),
-                        "has_editorial_notes": bool(metadata.get("editorial_notes")),
-                        "editorial_notes_count": len(metadata.get("editorial_notes") or []),
-                        "cross_references": metadata.get("cross_references") or [],
-                        "score": score,
-                    }
-                )
+        def process_with_chain(idx: int, row: dict) -> tuple[int, dict]:
+            new_chain = LegalRAGChain(settings=chain.settings)
+            new_chain.retriever = new_chain.vectorstore.as_retriever(
+                search_kwargs={"k": max_k_initial}
+            )
+            result = _process_single_question(new_chain, row, max_k_initial)
+            return idx, result
 
-        cached.append(
-            {
-                "id": row.get("id"),
-                "question": query,
-                "expected_articles": row.get("expected_articles", []),
-                "expected_sources": row.get("expected_sources", []),
-                "expects_editorial_context": bool(row.get("expects_editorial_context", False)),
-                "case_type": classify_case_type(row),
-                "negative_type": infer_negative_type(row),
-                "is_core": row.get("id") in CORE_QUESTION_IDS,
-                "routing_is_uncertain": bool(
-                    ((route_diag_after.get("routing_confidence") or {}).get("is_uncertain"))
-                ),
-                "routing_alignment_by_law": _build_routing_alignment_map(route_diag_after),
-                "retrieval_fallback_stage": route_diag_after.get("retrieval_fallback_stage"),
-                "retrieval_fallback": route_diag_after.get("retrieval_fallback"),
-                "candidates": candidates,
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(process_with_chain, i, row): i for i, row in enumerate(questions)
             }
-        )
-    return cached
+            for future in as_completed(futures):
+                idx, result = future.result()
+                cached[idx] = result
+                if (idx + 1) % 10 == 0 or idx == len(questions) - 1:
+                    logger.info("Precomputed %d/%d questions", idx + 1, len(questions))
+    else:
+        cached = []
+        for i, row in enumerate(questions):
+            result = _process_single_question(chain, row, max_k_initial)
+            cached.append(result)
+            if (i + 1) % 10 == 0 or i == len(questions) - 1:
+                logger.info("Precomputed %d/%d questions", i + 1, len(questions))
+
+    return [c for c in cached if c is not None]
 
 
 def evaluate_combo(
@@ -328,7 +400,12 @@ def evaluate_combo(
     """Compute retrieval metrics for one config combo using cached candidates."""
     calibration_bin_count = 5
     calibration_bins = [
-        {"low": i / calibration_bin_count, "high": (i + 1) / calibration_bin_count, "total": 0, "hits": 0}
+        {
+            "low": i / calibration_bin_count,
+            "high": (i + 1) / calibration_bin_count,
+            "total": 0,
+            "hits": 0,
+        }
         for i in range(calibration_bin_count)
     ]
     retrieval_hits = 0
@@ -432,10 +509,12 @@ def evaluate_combo(
         # Attachment model: editorial candidates are attached to provision rows,
         # not appended as standalone documents.
         provision_kept = [c for c in kept if c.get("doc_type") != "editorial_note"]
-        provision_kept, coherence_dropped, coherence_decision = _apply_law_coherence_filter_candidates(
-            provision_kept,
-            chain.settings,
-            law_ref_to_id=getattr(chain, "_law_ref_to_id", {}) or {},
+        provision_kept, coherence_dropped, coherence_decision = (
+            _apply_law_coherence_filter_candidates(
+                provision_kept,
+                chain.settings,
+                law_ref_to_id=getattr(chain, "_law_ref_to_id", {}) or {},
+            )
         )
         law_coherence_filtered_count += coherence_dropped
         if provision_kept:
@@ -537,8 +616,7 @@ def evaluate_combo(
             def _is_relevant_at_position(cited_source: dict[str, str]) -> bool:
                 if expected_sources:
                     return any(
-                        matches_expected_source(cited_source, exp)
-                        for exp in expected_sources
+                        matches_expected_source(cited_source, exp) for exp in expected_sources
                     )
                 cited_article = (cited_source.get("article_id") or "").strip()
                 return any(cited_article.startswith(exp_id) for exp_id in expected_article_ids)
@@ -619,9 +697,7 @@ def evaluate_combo(
                 matched = len(found_expected) > 0
                 precision = (matched_citations / len(cited_ids)) if cited_ids else 0.0
                 unexpected_rate = (
-                    (len(cited_ids) - matched_citations) / len(cited_ids)
-                    if cited_ids
-                    else 0.0
+                    (len(cited_ids) - matched_citations) / len(cited_ids) if cited_ids else 0.0
                 )
 
             if matched:
@@ -724,7 +800,8 @@ def evaluate_combo(
         else 1.0
     )
     negative_offtopic_nonlegal_success = (
-        segment["negative_offtopic_nonlegal"]["clean"] / segment["negative_offtopic_nonlegal"]["total"]
+        segment["negative_offtopic_nonlegal"]["clean"]
+        / segment["negative_offtopic_nonlegal"]["total"]
         if segment["negative_offtopic_nonlegal"]["total"]
         else 1.0
     )
@@ -749,19 +826,19 @@ def evaluate_combo(
         else 1.0
     )
     core_negative_offtopic_legal_success = (
-        core_segment["negative_offtopic_legal"]["clean"] / core_segment["negative_offtopic_legal"]["total"]
+        core_segment["negative_offtopic_legal"]["clean"]
+        / core_segment["negative_offtopic_legal"]["total"]
         if core_segment["negative_offtopic_legal"]["total"]
         else 1.0
     )
     core_negative_offtopic_nonlegal_success = (
-        core_segment["negative_offtopic_nonlegal"]["clean"] / core_segment["negative_offtopic_nonlegal"]["total"]
+        core_segment["negative_offtopic_nonlegal"]["clean"]
+        / core_segment["negative_offtopic_nonlegal"]["total"]
         if core_segment["negative_offtopic_nonlegal"]["total"]
         else 1.0
     )
     editorial_context_success = (
-        editorial_success / editorial_expected_total
-        if editorial_expected_total
-        else 1.0
+        editorial_success / editorial_expected_total if editorial_expected_total else 1.0
     )
     core_editorial_context_success = (
         core_editorial_success / core_editorial_expected_total
@@ -769,9 +846,7 @@ def evaluate_combo(
         else 1.0
     )
     non_editorial_clean_success = (
-        non_editorial_clean / non_editorial_expected_total
-        if non_editorial_expected_total
-        else 1.0
+        non_editorial_clean / non_editorial_expected_total if non_editorial_expected_total else 1.0
     )
     core_non_editorial_clean_success = (
         core_non_editorial_clean / core_non_editorial_expected_total
@@ -779,14 +854,10 @@ def evaluate_combo(
         else 1.0
     )
     mean_expected_coverage = (
-        expected_coverage_total / expected_coverage_count
-        if expected_coverage_count
-        else 0.0
+        expected_coverage_total / expected_coverage_count if expected_coverage_count else 0.0
     )
     citation_precision = (
-        citation_precision_total / citation_precision_count
-        if citation_precision_count
-        else 0.0
+        citation_precision_total / citation_precision_count if citation_precision_count else 0.0
     )
     unexpected_citation_rate = (
         unexpected_citation_rate_total / unexpected_citation_rate_count
@@ -794,9 +865,7 @@ def evaluate_combo(
         else 0.0
     )
     law_contamination_rate = (
-        law_contamination_cases / law_contamination_total
-        if law_contamination_total
-        else 0.0
+        law_contamination_cases / law_contamination_total if law_contamination_total else 0.0
     )
     false_positive_gating_rate = (
         false_positive_gating_count / positive_total if positive_total else 0.0
@@ -847,7 +916,10 @@ def evaluate_combo(
         expected_calibration_error += bucket_weight * abs(observed_precision - predicted_confidence)
         calibration_diagnostics.append(
             {
-                "score_range": [round(float(bin_item["low"]), 2), round(float(bin_item["high"]), 2)],
+                "score_range": [
+                    round(float(bin_item["low"]), 2),
+                    round(float(bin_item["high"]), 2),
+                ],
                 "total": total,
                 "observed_precision": observed_precision,
                 "predicted_confidence_midpoint": predicted_confidence,
@@ -953,7 +1025,10 @@ def main() -> None:
     profile_name = os.getenv("TRUST_PROFILE", settings.trust_profile_name)
     resolved_profile = apply_trust_profile(settings, profile_name)
     run_started_at = datetime.now(timezone.utc).isoformat()
-    run_id = os.getenv("LOVLI_RUN_ID") or f"sweep_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    run_id = (
+        os.getenv("LOVLI_RUN_ID")
+        or f"sweep_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    )
     questions_sha256 = _sha256_file(questions_path)
     git_commit = _safe_git_commit()
     logger.info(
@@ -984,6 +1059,19 @@ def main() -> None:
     }
 
     quick_grid = _env_flag("SWEEP_QUICK_GRID", default=False)
+    debug_grid = _env_flag("SWEEP_DEBUG_MODE", default=False)
+
+    if quick_grid and debug_grid:
+        logger.warning("Both SWEEP_QUICK_GRID and SWEEP_DEBUG_MODE are set. Using quick_grid.")
+    retrieval_k_initial_values: list[int] = []
+    retrieval_k_values: list[int] = []
+    confidence_values: list[float] = []
+    min_doc_values: list[float] = []
+    min_gap_values: list[float] = []
+    top_score_ceiling_values: list[float] = []
+    routing_fallback_unfiltered_values: list[bool] = []
+    reranker_context_enrichment_values: list[bool] = []
+    routing_summary_dualpass_values: list[bool] = []
     if quick_grid:
         retrieval_k_initial_values = [int(settings.retrieval_k_initial)]
         retrieval_k_values = [int(settings.retrieval_k)]
@@ -995,8 +1083,27 @@ def main() -> None:
         reranker_context_enrichment_values = [bool(settings.reranker_context_enrichment_enabled)]
         routing_summary_dualpass_values = [bool(settings.law_routing_summary_dualpass_enabled)]
         logger.info("SWEEP_QUICK_GRID=true: using profile-default values only (single combo)")
+    elif debug_grid:
+        retrieval_k_initial_values = [int(settings.retrieval_k_initial)]
+        retrieval_k_values = [3, 4, 5]
+        confidence_values = [0.25, 0.30, 0.35, 0.40]
+        min_doc_values = [0.25, 0.30, 0.35, 0.40]
+        min_gap_values = [float(settings.reranker_ambiguity_min_gap)]
+        top_score_ceiling_values = [float(settings.reranker_ambiguity_top_score_ceiling)]
+        routing_fallback_unfiltered_values = [bool(settings.law_routing_fallback_unfiltered)]
+        reranker_context_enrichment_values = [bool(settings.reranker_context_enrichment_enabled)]
+        routing_summary_dualpass_values = [bool(settings.law_routing_summary_dualpass_enabled)]
+        logger.info(
+            "SWEEP_DEBUG_MODE=true: using focused debug grid (%dx%dx%d=%d combos)",
+            len(retrieval_k_values),
+            len(confidence_values),
+            len(min_doc_values),
+            len(retrieval_k_values) * len(confidence_values) * len(min_doc_values),
+        )
     else:
-        retrieval_k_initial_values = _with_default_value([15, 20], int(settings.retrieval_k_initial))
+        retrieval_k_initial_values = _with_default_value(
+            [15, 20], int(settings.retrieval_k_initial)
+        )
         retrieval_k_values = _with_default_value([3, 5], int(settings.retrieval_k))
         confidence_values = _with_default_value(
             [0.30, 0.35, 0.45, 0.55],
@@ -1006,23 +1113,41 @@ def main() -> None:
             [0.25, 0.35, 0.45, 0.55],
             float(settings.reranker_min_doc_score),
         )
-        min_gap_values = _with_default_value([0.05, 0.10], float(settings.reranker_ambiguity_min_gap))
+        min_gap_values = _with_default_value(
+            [0.05, 0.10], float(settings.reranker_ambiguity_min_gap)
+        )
         top_score_ceiling_values = _with_default_value(
             [0.60, 0.70],
             float(settings.reranker_ambiguity_top_score_ceiling),
         )
         routing_fallback_unfiltered_values = [True, False]
-    if not quick_grid:
+    if not quick_grid and not debug_grid:
         if bool(settings.law_routing_fallback_unfiltered) not in routing_fallback_unfiltered_values:
-            routing_fallback_unfiltered_values.append(bool(settings.law_routing_fallback_unfiltered))
-        routing_fallback_unfiltered_values = sorted(set(routing_fallback_unfiltered_values), reverse=True)
+            routing_fallback_unfiltered_values.append(
+                bool(settings.law_routing_fallback_unfiltered)
+            )
+        routing_fallback_unfiltered_values = sorted(
+            set(routing_fallback_unfiltered_values), reverse=True
+        )
         reranker_context_enrichment_values = [True, False]
-        if bool(settings.reranker_context_enrichment_enabled) not in reranker_context_enrichment_values:
-            reranker_context_enrichment_values.append(bool(settings.reranker_context_enrichment_enabled))
-        reranker_context_enrichment_values = sorted(set(reranker_context_enrichment_values), reverse=True)
+        if (
+            bool(settings.reranker_context_enrichment_enabled)
+            not in reranker_context_enrichment_values
+        ):
+            reranker_context_enrichment_values.append(
+                bool(settings.reranker_context_enrichment_enabled)
+            )
+        reranker_context_enrichment_values = sorted(
+            set(reranker_context_enrichment_values), reverse=True
+        )
         routing_summary_dualpass_values = [False, True]
-        if bool(settings.law_routing_summary_dualpass_enabled) not in routing_summary_dualpass_values:
-            routing_summary_dualpass_values.append(bool(settings.law_routing_summary_dualpass_enabled))
+        if (
+            bool(settings.law_routing_summary_dualpass_enabled)
+            not in routing_summary_dualpass_values
+        ):
+            routing_summary_dualpass_values.append(
+                bool(settings.law_routing_summary_dualpass_enabled)
+            )
         routing_summary_dualpass_values = sorted(set(routing_summary_dualpass_values), reverse=True)
 
     logger.info("Loaded %s questions", len(questions))
@@ -1060,8 +1185,13 @@ def main() -> None:
         chain.settings.law_routing_summary_dualpass_enabled = dualpass_enabled
         cache_key_tuple = (fallback_unfiltered, reranker_ctx_enabled, dualpass_enabled)
         key_hash = _precompute_cache_key(
-            questions_sha256, git_commit, qdrant_collection, max_k_initial,
-            fallback_unfiltered, reranker_ctx_enabled, dualpass_enabled,
+            questions_sha256,
+            git_commit,
+            qdrant_collection,
+            max_k_initial,
+            fallback_unfiltered,
+            reranker_ctx_enabled,
+            dualpass_enabled,
         )
         cache_path = None
         if cache_dir:
@@ -1080,16 +1210,31 @@ def main() -> None:
                 ):
                     cached_candidates_by_mode[cache_key_tuple] = data["candidates"]
                     loaded = True
-                    logger.info("Loaded precompute cache %s (route_unfiltered=%s reranker_ctx=%s dualpass=%s)", key_hash[:12], fallback_unfiltered, reranker_ctx_enabled, dualpass_enabled)
+                    logger.info(
+                        "Loaded precompute cache %s (route_unfiltered=%s reranker_ctx=%s dualpass=%s)",
+                        key_hash[:12],
+                        fallback_unfiltered,
+                        reranker_ctx_enabled,
+                        dualpass_enabled,
+                    )
             except Exception as e:
                 logger.warning("Cache load failed for %s: %s", cache_path, e)
         if not loaded:
+            parallel_precompute = _env_flag("SWEEP_PARALLEL_PRECOMPUTE", default=False)
+            max_workers = int(os.getenv("SWEEP_PARALLEL_WORKERS", "4"))
             logger.info(
                 "Precomputing candidates with k=%s (route_unfiltered=%s reranker_ctx=%s dualpass=%s)...",
-                max_k_initial, fallback_unfiltered, reranker_ctx_enabled, dualpass_enabled,
+                max_k_initial,
+                fallback_unfiltered,
+                reranker_ctx_enabled,
+                dualpass_enabled,
             )
             cached_candidates_by_mode[cache_key_tuple] = precompute_candidates(
-                chain, questions, max_k_initial=max_k_initial
+                chain,
+                questions,
+                max_k_initial=max_k_initial,
+                parallel=parallel_precompute,
+                max_workers=max_workers,
             )
             if cache_path:
                 try:
@@ -1109,7 +1254,61 @@ def main() -> None:
                 except Exception as e:
                     logger.warning("Cache save failed: %s", e)
 
+    enable_checkpoint = _env_flag("SWEEP_CHECKPOINT", default=True)
+    checkpoint_interval = int(os.getenv("SWEEP_CHECKPOINT_INTERVAL", "10"))
+    checkpoint_path = ROOT_DIR / "eval" / f"sweep_checkpoint_{run_id}.json"
     rows: list[dict] = []
+    if enable_checkpoint and checkpoint_path.exists():
+        try:
+            with open(checkpoint_path, "r", encoding="utf-8") as f:
+                checkpoint_data = json.load(f)
+            if checkpoint_data.get("run_id") == run_id:
+                rows = checkpoint_data.get("rows", [])
+                logger.info("Resumed from checkpoint: %d rows already completed", len(rows))
+        except Exception as e:
+            logger.warning("Checkpoint load failed: %s", e)
+
+    def save_checkpoint():
+        if enable_checkpoint:
+            try:
+                checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(checkpoint_path, "w", encoding="utf-8") as f:
+                    json.dump({"run_id": run_id, "rows": rows}, f, ensure_ascii=False)
+            except Exception as e:
+                logger.warning("Checkpoint save failed: %s", e)
+
+    total_combos = (
+        len(retrieval_k_initial_values)
+        * len(retrieval_k_values)
+        * len(confidence_values)
+        * len(min_doc_values)
+        * len(min_gap_values)
+        * len(top_score_ceiling_values)
+        * len(routing_fallback_unfiltered_values)
+        * len(reranker_context_enrichment_values)
+        * len(routing_summary_dualpass_values)
+    )
+    logger.info("Total combos to evaluate: %d", total_combos)
+
+    if enable_checkpoint and rows:
+        existing_combo_keys = {
+            (
+                r.get("retrieval_k_initial"),
+                r.get("retrieval_k"),
+                r.get("reranker_confidence_threshold"),
+                r.get("reranker_min_doc_score"),
+                r.get("reranker_ambiguity_min_gap"),
+                r.get("reranker_ambiguity_top_score_ceiling"),
+                r.get("law_routing_fallback_unfiltered"),
+                r.get("reranker_context_enrichment_enabled"),
+                r.get("law_routing_summary_dualpass_enabled"),
+            )
+            for r in rows
+        }
+        logger.info("Found %d already completed combos in checkpoint", len(existing_combo_keys))
+    else:
+        existing_combo_keys = set()
+
     for (
         retrieval_k_initial,
         retrieval_k,
@@ -1131,6 +1330,19 @@ def main() -> None:
         reranker_context_enrichment_values,
         routing_summary_dualpass_values,
     ):
+        combo_key = (
+            retrieval_k_initial,
+            retrieval_k,
+            confidence,
+            min_doc,
+            min_gap,
+            top_score_ceiling,
+            routing_fallback_unfiltered,
+            reranker_context_enrichment,
+            routing_summary_dualpass,
+        )
+        if combo_key in existing_combo_keys:
+            continue
         apply_combo_to_chain(
             chain,
             retrieval_k_initial,
@@ -1229,6 +1441,9 @@ def main() -> None:
             metrics["non_editorial_clean_success"],
             metrics["avg_top_score"],
         )
+        if enable_checkpoint and len(rows) % checkpoint_interval == 0:
+            save_checkpoint()
+            logger.info("Checkpoint saved: %d/%d combos evaluated", len(rows), total_combos)
 
     # Sort by balanced objective first, then tie-breakers.
     rows.sort(
@@ -1258,7 +1473,9 @@ def main() -> None:
     precision_tolerance = float(os.getenv("SWEEP_PROMOTION_PRECISION_TOLERANCE", "0.005"))
     negative_tolerance = float(os.getenv("SWEEP_PROMOTION_NEGATIVE_TOLERANCE", "0.010"))
     baseline_snapshot = {
-        "source_boundary_mismatch_at_k": float(default_row.get("source_boundary_mismatch_at_k", 0.0)),
+        "source_boundary_mismatch_at_k": float(
+            default_row.get("source_boundary_mismatch_at_k", 0.0)
+        ),
         "mrr_at_5": float(default_row.get("mrr_at_5", 0.0)),
         "recall_at_5": float(default_row.get("recall_at_5", 0.0)),
         "citation_precision": float(default_row.get("citation_precision", 0.0)),
@@ -1271,8 +1488,12 @@ def main() -> None:
         )
         mrr_gain = float(row.get("mrr_at_5", 0.0)) - baseline_snapshot["mrr_at_5"]
         recall5_gain = float(row.get("recall_at_5", 0.0)) - baseline_snapshot["recall_at_5"]
-        citation_delta = float(row.get("citation_precision", 0.0)) - baseline_snapshot["citation_precision"]
-        negative_delta = float(row.get("negative_success", 0.0)) - baseline_snapshot["negative_success"]
+        citation_delta = (
+            float(row.get("citation_precision", 0.0)) - baseline_snapshot["citation_precision"]
+        )
+        negative_delta = (
+            float(row.get("negative_success", 0.0)) - baseline_snapshot["negative_success"]
+        )
 
         if boundary_gain < improvement_delta:
             reasons.append("insufficient_boundary_mismatch_gain")
@@ -1338,7 +1559,8 @@ def main() -> None:
             delta_max[metric] = max(delta_max[metric], diff)
         if (
             float(left.get("recall_at_k", 0.0)) == float(right.get("recall_at_k", 0.0))
-            and float(left.get("citation_precision", 0.0)) == float(right.get("citation_precision", 0.0))
+            and float(left.get("citation_precision", 0.0))
+            == float(right.get("citation_precision", 0.0))
             and float(left.get("unexpected_citation_rate", 0.0))
             == float(right.get("unexpected_citation_rate", 0.0))
         ):
@@ -1405,6 +1627,13 @@ def main() -> None:
             indent=2,
         )
     logger.info("Saved ablation summary: %s", summary_path)
+
+    if enable_checkpoint and checkpoint_path.exists():
+        try:
+            checkpoint_path.unlink()
+            logger.info("Checkpoint file cleaned up after successful completion")
+        except Exception as e:
+            logger.warning("Checkpoint cleanup failed: %s", e)
 
 
 if __name__ == "__main__":
