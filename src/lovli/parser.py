@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 # Base URL for Lovdata links
 LOVDATA_BASE_URL = "https://lovdata.no"
-_PARAGRAPH_REF_RE = re.compile(r"§\s*(\d+[A-Za-z]?)\s*-\s*(\d+\s*[A-Za-z]?)")
+_PARAGRAPH_REF_RE = re.compile(r"§\s*(\d+\s*[A-Za-z]?)\s*-\s*(\d+\s*[A-Za-z]?)")
 _EDITORIAL_NOTE_RE = re.compile(
     r"^\s*(?:\d+\s+)?(Endret ved (?:lov|forskrift)|Tilføyd ved (?:lov|forskrift)|Opphevet ved (?:lov|forskrift)|Tilføyet ved (?:lov|forskrift))",
     flags=re.IGNORECASE,
@@ -61,7 +61,7 @@ def _extract_law_ref_from_filename(filename: str) -> str:
     if len(parts) >= 3:
         prefix = parts[0]  # "nl" or "sf"
         date_part = parts[1]  # YYYYMMDD
-        num_part = parts[2]   # NNN
+        num_part = parts[2]  # NNN
         if len(date_part) == 8:
             year = date_part[:4]
             month = date_part[4:6]
@@ -193,10 +193,11 @@ def _canonicalize_article_id(
         return raw_article_id
 
     chapter_ref, paragraph_ref = match.group(1), match.group(2)
+    chapter_ref = re.sub(r"\s+", "", chapter_ref).lower()
     paragraph_ref = re.sub(r"\s+", "", paragraph_ref).lower()
 
     # Prefer chapter from heading when available, fall back to chapter_id/raw id.
-    chapter_from_heading = chapter_ref.lower()
+    chapter_from_heading = chapter_ref
     if chapter_from_heading and chapter_from_heading != "0":
         chapter = chapter_from_heading
     elif chapter_id and chapter_id.startswith("kapittel-"):
@@ -231,7 +232,10 @@ def _classify_doc_type(
     # Fallback IDs indicate nodes without a stable Lovdata anchor in source.
     # Classify by content signals rather than forcing editorial for all fallback chunks.
     if "_art_" in raw_article_id:
-        if _EDITORIAL_CONTEXT_RE.search(leading_content) and "skal lyde" not in leading_content_lower:
+        if (
+            _EDITORIAL_CONTEXT_RE.search(leading_content)
+            and "skal lyde" not in leading_content_lower
+        ):
             return "editorial_note"
 
     return "provision"
@@ -353,8 +357,12 @@ def _collect_articles(
             )
         )
 
-        section_article_ids = {id(article) for section in sections for article in section.find_all("article")}
-        root_level_articles = [a for a in soup.find_all("article") if id(a) not in section_article_ids]
+        section_article_ids = {
+            id(article) for section in sections for article in section.find_all("article")
+        }
+        root_level_articles = [
+            a for a in soup.find_all("article") if id(a) not in section_article_ids
+        ]
         if root_level_articles:
             add_unique(
                 _parse_articles_flat(
@@ -408,13 +416,21 @@ def _parse_hierarchical(
         if chapter_title:
             match = re.match(r"^Kapittel\s+\d+[A-Za-z]?\.\s*", chapter_title)
             if match:
-                chapter_title_clean = chapter_title[match.end():].strip() or chapter_title
+                chapter_title_clean = chapter_title[match.end() :].strip() or chapter_title
 
         articles = section.find_all("article")
         for idx, article in enumerate(articles):
             result = _extract_article(
-                article, idx, law_id, law_ref, law_title_text, law_short_name,
-                chapter_id, chapter_title_clean, xml_path, allow_nested_ids,
+                article,
+                idx,
+                law_id,
+                law_ref,
+                law_title_text,
+                law_short_name,
+                chapter_id,
+                chapter_title_clean,
+                xml_path,
+                allow_nested_ids,
             )
             if result:
                 if result.doc_type == "editorial_note":
@@ -440,8 +456,16 @@ def _parse_articles_flat(
     last_provision_article_id: str | None = None
     for idx, article in enumerate(articles):
         result = _extract_article(
-            article, idx, law_id, law_ref, law_title_text, law_short_name,
-            chapter_id=None, chapter_title=None, xml_path=xml_path, allow_nested_ids=allow_nested_ids,
+            article,
+            idx,
+            law_id,
+            law_ref,
+            law_title_text,
+            law_short_name,
+            chapter_id=None,
+            chapter_title=None,
+            xml_path=xml_path,
+            allow_nested_ids=allow_nested_ids,
         )
         if result:
             if result.doc_type == "editorial_note":

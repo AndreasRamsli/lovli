@@ -37,24 +37,29 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
-def build_id_mapping(data_dir: Path) -> Dict[Tuple[str, str], str]:
+def build_id_mapping(data_dirs: list[Path]) -> Dict[Tuple[str, str], str]:
     """
     Build mapping of (law_id, old_article_id) -> canonical_article_id.
 
     Uses parser output where `source_anchor_id` is the raw XML anchor and
-    `article_id` is canonicalized.
+    `article_id` is canonicalized.  Accepts multiple directories so that both
+    nl/ (lover) and sf/ (forskrifter) can be processed in a single pass.
     """
     mapping: Dict[Tuple[str, str], str] = {}
-    xml_files = sorted(data_dir.glob("*.xml"))
-    for xml_path in xml_files:
-        for article in parse_xml_file(xml_path):
-            raw_id = article.source_anchor_id or article.article_id
-            if raw_id != article.article_id:
-                mapping[(article.law_id, raw_id)] = article.article_id
+    for data_dir in data_dirs:
+        xml_files = sorted(data_dir.glob("*.xml"))
+        logger.info("Scanning %s XML files in %s", len(xml_files), data_dir)
+        for xml_path in xml_files:
+            for article in parse_xml_file(xml_path):
+                raw_id = article.source_anchor_id or article.article_id
+                if raw_id != article.article_id:
+                    mapping[(article.law_id, raw_id)] = article.article_id
     return mapping
 
 
-def migrate_collection(client: QdrantClient, collection: str, mapping: Dict[Tuple[str, str], str], apply: bool) -> tuple[int, int]:
+def migrate_collection(
+    client: QdrantClient, collection: str, mapping: Dict[Tuple[str, str], str], apply: bool
+) -> tuple[int, int]:
     """Migrate Qdrant payload metadata.article_id values."""
     offset = None
     scanned = 0
@@ -113,8 +118,14 @@ def main() -> None:
     parser.add_argument(
         "--data-dir",
         type=Path,
-        default=ROOT_DIR / "data" / "nl",
-        help="Directory containing law XML files (default: data/nl)",
+        action="append",
+        dest="data_dirs",
+        metavar="DIR",
+        help=(
+            "Directory containing law XML files. "
+            "May be specified multiple times (e.g. --data-dir data/nl --data-dir data/sf). "
+            "Defaults to data/nl and data/sf when not supplied."
+        ),
     )
     parser.add_argument(
         "--apply",
@@ -122,6 +133,9 @@ def main() -> None:
         help="Apply migration updates. Without this flag, script runs in dry-run mode.",
     )
     args = parser.parse_args()
+
+    # Default: scan both nl/ and sf/ so no data directory is silently skipped.
+    data_dirs: list[Path] = args.data_dirs or [ROOT_DIR / "data" / "nl", ROOT_DIR / "data" / "sf"]
 
     load_dotenv(ROOT_DIR / ".env")
     settings = get_settings()
@@ -134,7 +148,7 @@ def main() -> None:
     else:
         client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key)
 
-    mapping = build_id_mapping(args.data_dir)
+    mapping = build_id_mapping(data_dirs)
     logger.info("Built %s old->new article ID mappings", len(mapping))
 
     scanned, changed = migrate_collection(
@@ -145,7 +159,9 @@ def main() -> None:
     )
     logger.info("Scanned %s points; %s would change", scanned, changed)
     if args.apply:
-        logger.info("Applied article ID migration to collection '%s'", settings.qdrant_collection_name)
+        logger.info(
+            "Applied article ID migration to collection '%s'", settings.qdrant_collection_name
+        )
     else:
         logger.info("Dry-run only. Re-run with --apply to write changes.")
 
