@@ -92,13 +92,13 @@ def scan_doc_type_metrics(client: QdrantClient, collection_name: str) -> dict[st
                 provision_count += 1
             elif doc_type == "editorial_note":
                 editorial_note_count += 1
+            else:
+                other_doc_type_count += 1
             if doc_type == "provision":
                 notes = metadata.get("editorial_notes") or []
                 if notes:
                     provisions_with_editorial_payload += 1
                     total_editorial_notes_in_payload += len(notes)
-            else:
-                other_doc_type_count += 1
 
         if offset is None:
             break
@@ -135,7 +135,9 @@ def run_retrieval_smoke_checks() -> list[dict[str, object]]:
                 "query": query,
                 "sources_count": len(sources),
                 "doc_types": doc_types,
-                "has_editorial_doc_type": any(doc_type == "editorial_note" for doc_type in doc_types),
+                "has_editorial_doc_type": any(
+                    doc_type == "editorial_note" for doc_type in doc_types
+                ),
                 "provision_after_editorial": provision_after_editorial,
             }
         )
@@ -143,7 +145,9 @@ def run_retrieval_smoke_checks() -> list[dict[str, object]]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Validate doc_type completeness and retrieval quality.")
+    parser = argparse.ArgumentParser(
+        description="Validate doc_type completeness and retrieval quality."
+    )
     parser.add_argument(
         "--collection",
         type=str,
