@@ -5,7 +5,7 @@ import sys
 import streamlit as st
 from lovli.config import get_settings
 from lovli.chain import LegalRAGChain, NO_RESULTS_RESPONSE
-from lovli.utils import extract_chat_history
+from lovli.profiles import extract_chat_history
 
 # Configure logging
 logging.basicConfig(
@@ -98,6 +98,7 @@ def _inject_ui_styles() -> None:
         unsafe_allow_html=True,
     )
 
+
 def _format_source(source: dict) -> str:
     """Format a source dict into a readable markdown string."""
     # Use short name if available, otherwise full title
@@ -167,7 +168,7 @@ def _truncate_label(value: str, max_length: int = 82) -> str:
     """Truncate long labels for cleaner button rendering."""
     if len(value) <= max_length:
         return value
-    return f"{value[:max_length - 3]}..."
+    return f"{value[: max_length - 3]}..."
 
 
 # Page configuration
@@ -282,9 +283,7 @@ for message in st.session_state.messages:
             _render_sources(message["sources"])
 
 if not st.session_state.messages:
-    st.info(
-        "Still a question to get started, or choose a suggested prompt in the sidebar."
-    )
+    st.info("Still a question to get started, or choose a suggested prompt in the sidebar.")
 else:
     st.caption("Ask follow-up questions to keep the context in the conversation.")
 
@@ -309,9 +308,7 @@ if prompt:
             with st.spinner(LOADING_TEXT):
                 # Extract chat history for query rewriting
                 chat_history = extract_chat_history(
-                    st.session_state.messages,
-                    window_size=CHAT_HISTORY_WINDOW,
-                    exclude_current=True
+                    st.session_state.messages, window_size=CHAT_HISTORY_WINDOW, exclude_current=True
                 )
                 sources, top_score, scores = rag_chain.retrieve(
                     prompt,
@@ -323,15 +320,17 @@ if prompt:
                 answer = NO_RESULTS_RESPONSE
                 st.warning("No direct legal sources matched strongly enough for this query.")
                 st.markdown(answer)
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": answer,
-                    "sources": [],
-                })
+                st.session_state.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": answer,
+                        "sources": [],
+                    }
+                )
             else:
                 # Check if confidence gating will fire before streaming
                 is_gated = rag_chain.should_gate_answer(top_score, scores=scores)
-                
+
                 # Stream the answer (with confidence gating)
                 answer = st.write_stream(
                     rag_chain.stream_answer(
@@ -346,7 +345,9 @@ if prompt:
                 if not is_gated:
                     _render_sources(sources)
                 else:
-                    st.info("Response confidence was low, so source cards were intentionally hidden.")
+                    st.info(
+                        "Response confidence was low, so source cards were intentionally hidden."
+                    )
 
                 st.caption("Finished.")
 
@@ -357,7 +358,11 @@ if prompt:
                     if is_gated
                     else [
                         {
-                            **{k: v for k, v in s.items() if k not in {"content", "editorial_notes"}},
+                            **{
+                                k: v
+                                for k, v in s.items()
+                                if k not in {"content", "editorial_notes"}
+                            },
                             "editorial_notes": [
                                 {
                                     "article_id": note.get("article_id"),
@@ -372,20 +377,24 @@ if prompt:
                         for s in sources
                     ]
                 )
-                st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": answer,
-                    "sources": sources_for_storage,
-                })
+                st.session_state.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": answer,
+                        "sources": sources_for_storage,
+                    }
+                )
         except ValueError as e:
             error_msg = f"Ugyldig forespørsel: {str(e)}"
             logger.warning(f"Validation error: {e}")
             st.warning(error_msg)
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": error_msg,
-                "sources": [],
-            })
+            st.session_state.messages.append(
+                {
+                    "role": "assistant",
+                    "content": error_msg,
+                    "sources": [],
+                }
+            )
         except Exception as e:
             error_msg = (
                 "Beklager, det oppstod en feil ved behandling av spørsmålet ditt. "
@@ -393,8 +402,10 @@ if prompt:
             )
             logger.error(f"Error processing query: {e}", exc_info=True)
             st.error(error_msg)
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": error_msg,
-                "sources": [],
-            })
+            st.session_state.messages.append(
+                {
+                    "role": "assistant",
+                    "content": error_msg,
+                    "sources": [],
+                }
+            )

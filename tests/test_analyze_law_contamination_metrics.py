@@ -29,13 +29,13 @@ def _load_analyze_module():
     lovli_config_stub.get_settings = lambda: None
     sys.modules.setdefault("lovli.config", lovli_config_stub)
 
-    lovli_retrieval_stub = types.ModuleType("lovli.retrieval_shared")
+    lovli_retrieval_stub = types.ModuleType("lovli.scoring")
     lovli_retrieval_stub.matches_expected_source = lambda *_args, **_kwargs: False
-    sys.modules.setdefault("lovli.retrieval_shared", lovli_retrieval_stub)
+    sys.modules.setdefault("lovli.scoring", lovli_retrieval_stub)
 
-    lovli_trust_profiles_stub = types.ModuleType("lovli.trust_profiles")
+    lovli_trust_profiles_stub = types.ModuleType("lovli.profiles")
     lovli_trust_profiles_stub.apply_trust_profile = lambda *_args, **_kwargs: "balanced_v1"
-    sys.modules.setdefault("lovli.trust_profiles", lovli_trust_profiles_stub)
+    sys.modules.setdefault("lovli.profiles", lovli_trust_profiles_stub)
 
     spec = importlib.util.spec_from_file_location(module_name, script_path)
     assert spec and spec.loader

@@ -32,8 +32,8 @@ sys.path.insert(0, str(ROOT_DIR / "src"))
 
 from lovli.chain import LegalRAGChain  # noqa: E402
 from lovli.config import get_settings  # noqa: E402
-from lovli.retrieval_shared import matches_expected_source  # noqa: E402
-from lovli.trust_profiles import apply_trust_profile  # noqa: E402
+from lovli.scoring import matches_expected_source  # noqa: E402
+from lovli.profiles import apply_trust_profile  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -52,14 +52,11 @@ INTENT_TERMS = {
 def _safe_git_commit() -> str:
     """Best-effort current git commit SHA."""
     try:
-        return (
-            subprocess.check_output(
-                ["git", "rev-parse", "HEAD"],
-                cwd=str(ROOT_DIR),
-                text=True,
-            )
-            .strip()
-        )
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(ROOT_DIR),
+            text=True,
+        ).strip()
     except Exception:
         return "unknown"
 
@@ -107,7 +104,9 @@ def _extract_intent_terms(question: str) -> list[str]:
     return sorted(tokens & INTENT_TERMS)
 
 
-def analyze_question(chain: LegalRAGChain, row: dict[str, Any], retrieval_k_initial: int) -> dict[str, Any]:
+def analyze_question(
+    chain: LegalRAGChain, row: dict[str, Any], retrieval_k_initial: int
+) -> dict[str, Any]:
     """Analyze one question and return law-level contamination diagnostics."""
     question = row["question"]
     expected_sources = row.get("expected_sources", []) or []
@@ -123,7 +122,9 @@ def analyze_question(chain: LegalRAGChain, row: dict[str, Any], retrieval_k_init
     routed_law_ids = chain._route_law_ids(question)
     routing_diagnostics = dict(getattr(chain, "_last_routing_diagnostics", {}) or {})
     docs = chain._invoke_retriever(question, routed_law_ids=routed_law_ids)
-    routing_diagnostics = dict(getattr(chain, "_last_routing_diagnostics", routing_diagnostics) or routing_diagnostics)
+    routing_diagnostics = dict(
+        getattr(chain, "_last_routing_diagnostics", routing_diagnostics) or routing_diagnostics
+    )
 
     # Deduplicate by (law_id, article_id) the same way as runtime retrieve().
     dedup_docs = []
@@ -191,7 +192,9 @@ def analyze_question(chain: LegalRAGChain, row: dict[str, Any], retrieval_k_init
         for entry in foreign_laws:
             foreign_score_gaps.append(dominant_avg_score - entry["avg_score"])
 
-    cited_sources = [{"law_id": item["law_id"], "article_id": item["article_id"]} for item in provision_rows]
+    cited_sources = [
+        {"law_id": item["law_id"], "article_id": item["article_id"]} for item in provision_rows
+    ]
     unexpected_sources = []
     matched_expected_pairs = 0
     if expected_sources:
@@ -199,15 +202,15 @@ def analyze_question(chain: LegalRAGChain, row: dict[str, Any], retrieval_k_init
             if not any(matches_expected_source(cited, exp) for exp in expected_sources):
                 unexpected_sources.append(cited)
         matched_expected_pairs = sum(
-            1 for exp in expected_sources if any(matches_expected_source(cited, exp) for cited in cited_sources)
+            1
+            for exp in expected_sources
+            if any(matches_expected_source(cited, exp) for cited in cited_sources)
         )
     else:
         # For negatives, all citations are unexpected.
         unexpected_sources = cited_sources
 
-    routed_law_ids_normalized = [
-        law_id for law_id in routed_law_ids if (law_id or "").strip()
-    ]
+    routed_law_ids_normalized = [law_id for law_id in routed_law_ids if (law_id or "").strip()]
     route_miss_expected_law = bool(
         expected_law_ids
         and routed_law_ids_normalized
@@ -271,7 +274,9 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     contaminated = [r for r in results if r["has_contamination"]]
     singleton_foreign_cases = [r for r in results if (r.get("singleton_foreign_laws") or 0) > 0]
 
-    gaps = [r["avg_foreign_score_gap"] for r in results if r.get("avg_foreign_score_gap") is not None]
+    gaps = [
+        r["avg_foreign_score_gap"] for r in results if r.get("avg_foreign_score_gap") is not None
+    ]
     unexpected_total = sum(r.get("unexpected_sources_count", 0) for r in results)
     cited_total = sum(r.get("retrieved_sources_count", 0) for r in results)
     positives = [r for r in results if (r.get("expected_sources") or [])]
@@ -319,8 +324,12 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     fallback_triggered_by_stage: dict[str, int] = defaultdict(int)
     fallback_recovered_by_stage: dict[str, int] = defaultdict(int)
     positive_count_by_stage: dict[str, int] = defaultdict(int)
-    route_miss_count_by_mode_stage: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    effective_miss_count_by_mode_stage: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    route_miss_count_by_mode_stage: dict[str, dict[str, int]] = defaultdict(
+        lambda: defaultdict(int)
+    )
+    effective_miss_count_by_mode_stage: dict[str, dict[str, int]] = defaultdict(
+        lambda: defaultdict(int)
+    )
     positive_count_by_mode_stage: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     route_miss_law_pair_confusions: dict[str, int] = defaultdict(int)
     effective_miss_law_pair_confusions: dict[str, int] = defaultdict(int)
@@ -356,25 +365,18 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
             positive_count_by_mode_stage[routing_mode][fallback_stage] += 1
 
     fallback_recovery_rate_by_stage = {
-        stage: (
-            float(fallback_recovered_by_stage.get(stage, 0)) / float(count)
-            if count
-            else 0.0
-        )
+        stage: (float(fallback_recovered_by_stage.get(stage, 0)) / float(count) if count else 0.0)
         for stage, count in sorted(fallback_triggered_by_stage.items())
     }
     route_miss_rate_by_stage = {
-        stage: (
-            float(route_miss_by_fallback_stage.get(stage, 0)) / float(count)
-            if count
-            else 0.0
-        )
+        stage: (float(route_miss_by_fallback_stage.get(stage, 0)) / float(count) if count else 0.0)
         for stage, count in sorted(positive_count_by_stage.items())
     }
     route_miss_rate_by_mode_stage = {
         mode: {
             stage: (
-                float(route_miss_count_by_mode_stage.get(mode, {}).get(stage, 0)) / float(positive_count)
+                float(route_miss_count_by_mode_stage.get(mode, {}).get(stage, 0))
+                / float(positive_count)
                 if positive_count
                 else 0.0
             )
@@ -384,16 +386,15 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
     }
     effective_miss_rate_by_stage = {
         stage: (
-            float(effective_miss_by_fallback_stage.get(stage, 0)) / float(count)
-            if count
-            else 0.0
+            float(effective_miss_by_fallback_stage.get(stage, 0)) / float(count) if count else 0.0
         )
         for stage, count in sorted(positive_count_by_stage.items())
     }
     effective_miss_rate_by_mode_stage = {
         mode: {
             stage: (
-                float(effective_miss_count_by_mode_stage.get(mode, {}).get(stage, 0)) / float(positive_count)
+                float(effective_miss_count_by_mode_stage.get(mode, {}).get(stage, 0))
+                / float(positive_count)
                 if positive_count
                 else 0.0
             )
@@ -407,10 +408,7 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         for term in row.get("intent_terms") or []:
             failing_intent_counts[term] += 1
     failing_intent_clusters = sorted(
-        (
-            {"intent_term": term, "count": count}
-            for term, count in failing_intent_counts.items()
-        ),
+        ({"intent_term": term, "count": count} for term, count in failing_intent_counts.items()),
         key=lambda item: item["count"],
         reverse=True,
     )
@@ -436,22 +434,32 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
             if (((r.get("coherence_diagnostics") or {}).get("removed_count") or 0) > 0)
         ),
         "route_miss_expected_law_count": len(route_miss_cases),
-        "route_miss_expected_law_rate": (len(route_miss_cases) / len(positives)) if positives else 0.0,
+        "route_miss_expected_law_rate": (len(route_miss_cases) / len(positives))
+        if positives
+        else 0.0,
         "routing_candidate_miss_count": len(route_miss_cases),
-        "routing_candidate_miss_rate": (len(route_miss_cases) / len(positives)) if positives else 0.0,
+        "routing_candidate_miss_rate": (len(route_miss_cases) / len(positives))
+        if positives
+        else 0.0,
         "effective_expected_law_miss_count": len(effective_expected_law_miss_cases),
         "effective_expected_law_miss_rate": (
             len(effective_expected_law_miss_cases) / len(positives)
-        ) if positives else 0.0,
+        )
+        if positives
+        else 0.0,
         "route_miss_recovered_count": len(recovered_from_route_miss_cases),
-        "route_miss_recovered_rate": (
-            len(recovered_from_route_miss_cases) / len(route_miss_cases)
-        ) if route_miss_cases else 0.0,
+        "route_miss_recovered_rate": (len(recovered_from_route_miss_cases) / len(route_miss_cases))
+        if route_miss_cases
+        else 0.0,
         "dominant_law_mismatch_count": len(dominant_mismatch_cases),
-        "dominant_law_mismatch_rate": (len(dominant_mismatch_cases) / len(positives)) if positives else 0.0,
+        "dominant_law_mismatch_rate": (len(dominant_mismatch_cases) / len(positives))
+        if positives
+        else 0.0,
         "fallback_triggered_count": len(fallback_cases),
         "fallback_recovered_count": len(fallback_recovered_cases),
-        "fallback_recovery_rate": (len(fallback_recovered_cases) / len(fallback_cases)) if fallback_cases else 0.0,
+        "fallback_recovery_rate": (len(fallback_recovered_cases) / len(fallback_cases))
+        if fallback_cases
+        else 0.0,
         "fallback_stage_counts": dict(sorted(fallback_stage_counts.items())),
         "routing_selection_mode_counts": dict(sorted(routing_selection_mode_counts.items())),
         "route_miss_by_fallback_stage": dict(sorted(route_miss_by_fallback_stage.items())),
@@ -473,7 +481,9 @@ def summarize(results: list[dict[str, Any]]) -> dict[str, Any]:
         "effective_miss_rate_by_mode_stage": effective_miss_rate_by_mode_stage,
         "top_route_miss_law_pair_confusions": [
             {"law_pair": pair, "count": count}
-            for pair, count in sorted(route_miss_law_pair_confusions.items(), key=lambda item: item[1], reverse=True)[:10]
+            for pair, count in sorted(
+                route_miss_law_pair_confusions.items(), key=lambda item: item[1], reverse=True
+            )[:10]
         ],
         "top_effective_miss_law_pair_confusions": [
             {"law_pair": pair, "count": count}
@@ -497,7 +507,9 @@ def build_hard_cluster_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
     if mismatch_rows:
         cluster_rows["dominant_law_mismatch"] = mismatch_rows
 
-    fallback_rows = [row for row in results if (row.get("fallback_reason") or "").startswith("uncertainty")]
+    fallback_rows = [
+        row for row in results if (row.get("fallback_reason") or "").startswith("uncertainty")
+    ]
     if fallback_rows:
         cluster_rows["uncertainty_fallback"] = fallback_rows
 
@@ -540,7 +552,9 @@ def build_hard_cluster_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Analyze cross-law contamination in retrieval results.")
+    parser = argparse.ArgumentParser(
+        description="Analyze cross-law contamination in retrieval results."
+    )
     parser.add_argument(
         "--questions",
         type=Path,
@@ -572,7 +586,10 @@ def main() -> None:
     profile_name = os.getenv("TRUST_PROFILE", settings.trust_profile_name)
     resolved_profile = apply_trust_profile(settings, profile_name)
     run_started_at = datetime.now(timezone.utc).isoformat()
-    run_id = os.getenv("LOVLI_RUN_ID") or f"contam_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    run_id = (
+        os.getenv("LOVLI_RUN_ID")
+        or f"contam_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+    )
     git_commit = _safe_git_commit()
     questions_sha256 = _sha256_file(args.questions)
     logger.info(
@@ -606,9 +623,12 @@ def main() -> None:
     cache_dir_raw = os.getenv("CONTAMINATION_CACHE_DIR")
     cache_dir = Path(cache_dir_raw) if cache_dir_raw and cache_dir_raw.strip() else None
     key_hash = _contamination_cache_key(
-        questions_sha256, git_commit,
-        settings.trust_profile_name, settings.trust_profile_version,
-        retrieval_k_initial, settings.qdrant_collection_name,
+        questions_sha256,
+        git_commit,
+        settings.trust_profile_name,
+        settings.trust_profile_version,
+        retrieval_k_initial,
+        settings.qdrant_collection_name,
         len(questions),
     )
     cache_path = cache_dir / f"contamination_report_{key_hash}.json" if cache_dir else None
@@ -638,7 +658,9 @@ def main() -> None:
             logger.warning("Contamination cache load failed: %s", e)
 
     chain = LegalRAGChain(settings=settings)
-    logger.info("Analyzing %s questions (retrieval_k_initial=%s)", len(questions), retrieval_k_initial)
+    logger.info(
+        "Analyzing %s questions (retrieval_k_initial=%s)", len(questions), retrieval_k_initial
+    )
 
     workers_raw = os.getenv("CONTAMINATION_PARALLEL_WORKERS", "0").strip()
     try:
@@ -651,9 +673,7 @@ def main() -> None:
         rows = [None] * len(questions)
         with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
             future_to_idx = {
-                executor.submit(
-                    analyze_question, chain, row, retrieval_k_initial=retrieval_k
-                ): idx
+                executor.submit(analyze_question, chain, row, retrieval_k_initial=retrieval_k): idx
                 for idx, row in enumerate(questions)
             }
             done = 0

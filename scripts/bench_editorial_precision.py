@@ -22,10 +22,11 @@ sys.path.insert(0, str(ROOT_DIR / "src"))
 
 from lovli.chain import LegalRAGChain
 from lovli.config import get_settings
-from lovli.eval_utils import validate_questions
+from lovli.eval import validate_questions
 
 # Load sweep module by path (scripts is not a package)
 import importlib.util
+
 _sweep_path = ROOT_DIR / "scripts" / "sweep_retrieval_thresholds.py"
 _spec = importlib.util.spec_from_file_location("sweep_retrieval_thresholds", _sweep_path)
 _sweep_mod = importlib.util.module_from_spec(_spec)
@@ -126,9 +127,7 @@ def _compute_per_question_metrics(
                         break
             precision = (matched_citations / len(cited_ids)) if cited_ids else 0.0
             unexpected_rate = (
-                (len(cited_ids) - matched_citations) / len(cited_ids)
-                if cited_ids
-                else 0.0
+                (len(cited_ids) - matched_citations) / len(cited_ids) if cited_ids else 0.0
             )
 
     return {
@@ -163,15 +162,11 @@ def run_benchmark(chain_or_settings, cached_candidates: list[dict]) -> dict:
     per_question_on: list[dict] = []
 
     for row in cached_candidates:
-        m_off = _compute_per_question_metrics(
-            row, min_sources, include_editorial=False
-        )
+        m_off = _compute_per_question_metrics(row, min_sources, include_editorial=False)
         m_off["id"] = row.get("id")
         per_question_off.append(m_off)
 
-        m_on = _compute_per_question_metrics(
-            row, min_sources, include_editorial=True
-        )
+        m_on = _compute_per_question_metrics(row, min_sources, include_editorial=True)
         m_on["id"] = row.get("id")
         per_question_on.append(m_on)
 
@@ -188,23 +183,31 @@ def run_benchmark(chain_or_settings, cached_candidates: list[dict]) -> dict:
     unexpected_off = mean_vals([r["unexpected_rate"] for r in pos_off])
     unexpected_on = mean_vals([r["unexpected_rate"] for r in pos_on])
 
-    non_editorial_rows = [r for r in cached_candidates if not r.get("expects_editorial_context", False)]
+    non_editorial_rows = [
+        r for r in cached_candidates if not r.get("expects_editorial_context", False)
+    ]
     non_editorial_ids = {row.get("id") for row in non_editorial_rows}
-    non_editorial_clean_off = sum(1 for r in per_question_off if r["id"] in non_editorial_ids and not r["cited_editorial"])
-    non_editorial_clean_on = sum(1 for r in per_question_on if r["id"] in non_editorial_ids and not r["cited_editorial"])
+    non_editorial_clean_off = sum(
+        1 for r in per_question_off if r["id"] in non_editorial_ids and not r["cited_editorial"]
+    )
+    non_editorial_clean_on = sum(
+        1 for r in per_question_on if r["id"] in non_editorial_ids and not r["cited_editorial"]
+    )
     non_editorial_total = len(non_editorial_rows)
 
     # Per-question precision deltas (only positive questions)
     deltas = []
     for po, pn in zip(per_question_off, per_question_on):
         if po["id"] in positive_ids:
-            deltas.append({
-                "id": po["id"],
-                "precision_off": po["precision"],
-                "precision_on": pn["precision"],
-                "delta": pn["precision"] - po["precision"],
-                "expects_editorial_context": po["expects_editorial_context"],
-            })
+            deltas.append(
+                {
+                    "id": po["id"],
+                    "precision_off": po["precision"],
+                    "precision_on": pn["precision"],
+                    "delta": pn["precision"] - po["precision"],
+                    "expects_editorial_context": po["expects_editorial_context"],
+                }
+            )
     deltas.sort(key=lambda x: x["delta"])
 
     return {
@@ -216,7 +219,9 @@ def run_benchmark(chain_or_settings, cached_candidates: list[dict]) -> dict:
         "non_editorial_clean_on": non_editorial_clean_on,
         "non_editorial_total": non_editorial_total,
         "deltas": deltas,
-        "n_expect_editorial": sum(1 for r in cached_candidates if r.get("expects_editorial_context")),
+        "n_expect_editorial": sum(
+            1 for r in cached_candidates if r.get("expects_editorial_context")
+        ),
         "n_positive": len(positive_ids),
         "n_negative": len(cached_candidates) - len(positive_ids),
     }
@@ -227,14 +232,20 @@ def print_report(result: dict) -> None:
     r = result
     n = r["n_positive"] + r["n_negative"]
     print("=== Editorial Injection Precision Benchmark ===")
-    print(f"Questions: {n} ({r['n_expect_editorial']} expect editorial, {r['n_positive']} positive, {r['n_negative']} negative)")
+    print(
+        f"Questions: {n} ({r['n_expect_editorial']} expect editorial, {r['n_positive']} positive, {r['n_negative']} negative)"
+    )
     print()
     print("                          | editorial OFF | editorial ON | delta")
     print("-" * 65)
     prec_off, prec_on = r["citation_precision_off"], r["citation_precision_on"]
-    print(f"{'citation_precision':<25} | {prec_off:>13.3f} | {prec_on:>12.3f} | {prec_on - prec_off:+.3f}")
+    print(
+        f"{'citation_precision':<25} | {prec_off:>13.3f} | {prec_on:>12.3f} | {prec_on - prec_off:+.3f}"
+    )
     unexp_off, unexp_on = r["unexpected_citation_rate_off"], r["unexpected_citation_rate_on"]
-    print(f"{'unexpected_citation_rate':<25} | {unexp_off:>13.3f} | {unexp_on:>12.3f} | {unexp_on - unexp_off:+.3f}")
+    print(
+        f"{'unexpected_citation_rate':<25} | {unexp_off:>13.3f} | {unexp_on:>12.3f} | {unexp_on - unexp_off:+.3f}"
+    )
     nec_off, nec_on = r["non_editorial_clean_off"], r["non_editorial_clean_on"]
     nec_tot = r["non_editorial_total"]
     print(f"{'non_editorial_clean':<25} | {nec_off:>6}/{nec_tot:<6} | {nec_on:>6}/{nec_tot:<6} |")
@@ -242,7 +253,9 @@ def print_report(result: dict) -> None:
     print("--- Worst precision regressions (editorial ON vs OFF) ---")
     for d in r["deltas"][:15]:
         exp_tag = "[expects_editorial=true]" if d["expects_editorial_context"] else ""
-        print(f"  {d['id']}: {d['precision_off']:.3f} -> {d['precision_on']:.3f}  (delta {d['delta']:+.3f})  {exp_tag}")
+        print(
+            f"  {d['id']}: {d['precision_off']:.3f} -> {d['precision_on']:.3f}  (delta {d['delta']:+.3f})  {exp_tag}"
+        )
     if len(r["deltas"]) > 15:
         print(f"  ... and {len(r['deltas']) - 15} more")
 
@@ -288,9 +301,13 @@ def main() -> None:
     else:
         settings = get_settings()
         chain = LegalRAGChain(settings=settings)
-        validate_questions(questions, chain, skip_index_scan=_env_flag("SWEEP_SKIP_INDEX_SCAN", True))
+        validate_questions(
+            questions, chain, skip_index_scan=_env_flag("SWEEP_SKIP_INDEX_SCAN", True)
+        )
         print("Precomputing candidates against Qdrant...")
-        cached_candidates = precompute_candidates(chain, questions, max_k_initial=RETRIEVAL_K_INITIAL)
+        cached_candidates = precompute_candidates(
+            chain, questions, max_k_initial=RETRIEVAL_K_INITIAL
+        )
         save_path = Path(args.save)
         save_path.parent.mkdir(parents=True, exist_ok=True)
         with open(save_path, "w", encoding="utf-8") as f:

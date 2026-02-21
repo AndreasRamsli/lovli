@@ -1,7 +1,7 @@
 """Tests for utility functions."""
 
 import pytest
-from lovli.utils import extract_chat_history
+from lovli.profiles import extract_chat_history
 
 
 def test_extract_chat_history_empty():
@@ -49,10 +49,7 @@ def test_extract_chat_history_filters_empty():
 
 def test_extract_chat_history_window_size():
     """Test that window size limits messages."""
-    messages = [
-        {"role": "user", "content": f"Question {i}"}
-        for i in range(10)
-    ]
+    messages = [{"role": "user", "content": f"Question {i}"} for i in range(10)]
     result = extract_chat_history(messages, window_size=3, exclude_current=True)
     assert len(result) == 3
     assert result[0]["content"] == "Question 6"

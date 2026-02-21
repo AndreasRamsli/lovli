@@ -26,10 +26,11 @@ except ImportError:  # pragma: no cover - optional in some environments
 ROOT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT_DIR / "src"))
 
-from lovli.chain import LegalRAGChain, _infer_doc_type  # noqa: E402
+from lovli.chain import LegalRAGChain  # noqa: E402
 from lovli.config import get_settings  # noqa: E402
-from lovli.eval_utils import infer_negative_type, validate_questions  # noqa: E402
-from lovli.retrieval_shared import (  # noqa: E402
+from lovli.eval import infer_negative_type, validate_questions  # noqa: E402
+from lovli.scoring import (  # noqa: E402
+    _infer_doc_type,
     apply_uncertainty_law_cap,
     build_law_aware_rank_fusion,
     build_law_cross_reference_affinity,
@@ -37,7 +38,7 @@ from lovli.retrieval_shared import (  # noqa: E402
     matches_expected_source,
     normalize_sigmoid_scores,
 )
-from lovli.trust_profiles import apply_trust_profile  # noqa: E402
+from lovli.profiles import apply_trust_profile  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
