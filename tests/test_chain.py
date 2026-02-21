@@ -53,25 +53,30 @@ def mock_settings():
     settings.law_routing_dualpass_summary_weight = 0.45
     settings.law_routing_dualpass_title_weight = 0.35
     settings.law_routing_dualpass_fulltext_weight = 0.20
+    settings.law_routing_reranker_enabled = False
     return settings
 
 
 def test_should_gate_answer_high_score(mock_settings):
     """Test confidence gating with high score."""
-    with patch('lovli.chain.QdrantVectorStore'), \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'):
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
         chain = LegalRAGChain(mock_settings)
         assert chain.should_gate_answer(0.8) is False
 
 
 def test_should_gate_answer_low_score(mock_settings):
     """Test confidence gating with low score."""
-    with patch('lovli.chain.QdrantVectorStore'), \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'):
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
         chain = LegalRAGChain(mock_settings)
         assert chain.should_gate_answer(0.2) is True
 
@@ -79,21 +84,25 @@ def test_should_gate_answer_low_score(mock_settings):
 def test_should_gate_answer_no_reranker(mock_settings):
     """Test confidence gating when reranker is disabled."""
     mock_settings.reranker_enabled = False
-    with patch('lovli.chain.QdrantVectorStore'), \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'):
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
         chain = LegalRAGChain(mock_settings)
         assert chain.should_gate_answer(None) is False
 
 
 def test_validate_question_empty():
     """Test question validation with empty string."""
-    with patch('lovli.chain.QdrantVectorStore'), \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'), \
-         patch('lovli.chain.get_settings'):
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+        patch("lovli.chain.get_settings"),
+    ):
         settings = Mock()
         settings.embedding_model_name = "test"
         settings.qdrant_in_memory = True
@@ -103,7 +112,7 @@ def test_validate_question_empty():
         settings.retrieval_k_initial = 15
         settings.reranker_enabled = False
         settings.law_routing_enabled = False
-        
+
         chain = LegalRAGChain(settings)
         with pytest.raises(ValueError, match="Vennligst skriv inn et spørsmål"):
             chain._validate_question("")
@@ -111,11 +120,13 @@ def test_validate_question_empty():
 
 def test_validate_question_too_long():
     """Test question validation with overly long question."""
-    with patch('lovli.chain.QdrantVectorStore'), \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'), \
-         patch('lovli.chain.get_settings'):
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+        patch("lovli.chain.get_settings"),
+    ):
         settings = Mock()
         settings.embedding_model_name = "test"
         settings.qdrant_in_memory = True
@@ -125,7 +136,7 @@ def test_validate_question_too_long():
         settings.retrieval_k_initial = 15
         settings.reranker_enabled = False
         settings.law_routing_enabled = False
-        
+
         chain = LegalRAGChain(settings)
         long_question = "a" * 2000
         result = chain._validate_question(long_question)
@@ -134,10 +145,12 @@ def test_validate_question_too_long():
 
 def test_rerank_empty_docs(mock_settings):
     """Test reranking with empty document list."""
-    with patch('lovli.chain.QdrantVectorStore'), \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'):
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
         chain = LegalRAGChain(mock_settings)
         docs, scores = chain._rerank("test query", [])
         assert docs == []
@@ -147,10 +160,12 @@ def test_rerank_empty_docs(mock_settings):
 def test_rerank_no_reranker(mock_settings):
     """Test reranking when reranker is disabled."""
     mock_settings.reranker_enabled = False
-    with patch('lovli.chain.QdrantVectorStore'), \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'):
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
         chain = LegalRAGChain(mock_settings)
         mock_docs = [Mock(page_content="doc1"), Mock(page_content="doc2")]
         docs, scores = chain._rerank("test query", mock_docs)
@@ -160,10 +175,12 @@ def test_rerank_no_reranker(mock_settings):
 
 def test_apply_reranker_doc_filter_drops_low_scores(mock_settings):
     """Low-scoring docs should be dropped, while preserving min_sources."""
-    with patch('lovli.chain.QdrantVectorStore'), \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'):
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
         chain = LegalRAGChain(mock_settings)
         docs = [Mock(page_content=f"doc{i}") for i in range(4)]
         scores = [0.9, 0.31, 0.2, 0.1]
@@ -174,10 +191,12 @@ def test_apply_reranker_doc_filter_drops_low_scores(mock_settings):
 
 def test_apply_reranker_doc_filter_keeps_floor(mock_settings):
     """When all scores are low, keep min_sources from the top-ranked list."""
-    with patch('lovli.chain.QdrantVectorStore'), \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'):
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
         chain = LegalRAGChain(mock_settings)
         docs = [Mock(page_content=f"doc{i}") for i in range(3)]
         scores = [0.29, 0.28, 0.27]
@@ -188,10 +207,12 @@ def test_apply_reranker_doc_filter_keeps_floor(mock_settings):
 
 def test_should_gate_answer_ambiguity_gap(mock_settings):
     """Gate when top scores are close and below ambiguity ceiling."""
-    with patch('lovli.chain.QdrantVectorStore'), \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'):
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
         chain = LegalRAGChain(mock_settings)
         # Above confidence threshold, but ambiguous due to tiny gap.
         assert chain.should_gate_answer(0.5, scores=[0.5, 0.47, 0.2]) is True
@@ -199,10 +220,12 @@ def test_should_gate_answer_ambiguity_gap(mock_settings):
 
 def test_should_not_gate_answer_when_gap_clear(mock_settings):
     """Do not gate when confidence is acceptable and score gap is clear."""
-    with patch('lovli.chain.QdrantVectorStore'), \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'):
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
         chain = LegalRAGChain(mock_settings)
         assert chain.should_gate_answer(0.7, scores=[0.7, 0.5, 0.2]) is False
 
@@ -210,11 +233,13 @@ def test_should_not_gate_answer_when_gap_clear(mock_settings):
 def test_route_law_ids_matches_catalog_tokens(mock_settings):
     """Routing should prioritize laws with clear lexical overlap."""
     mock_settings.law_routing_enabled = True
-    with patch('lovli.chain.QdrantVectorStore'), \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'), \
-         patch('lovli.chain.load_catalog') as mock_load_catalog:
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+        patch("lovli.chain.load_catalog") as mock_load_catalog,
+    ):
         mock_load_catalog.return_value = [
             {
                 "law_id": "nl-19990326-017",
@@ -240,11 +265,13 @@ def test_route_law_ids_matches_catalog_tokens(mock_settings):
 def test_invoke_retriever_falls_back_when_filtered_empty(mock_settings):
     """If filtered retrieval returns nothing, fallback retriever should run."""
     mock_settings.law_routing_enabled = True
-    with patch('lovli.chain.QdrantVectorStore') as mock_vs, \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'), \
-         patch('lovli.chain.load_catalog'):
+    with (
+        patch("lovli.chain.QdrantVectorStore") as mock_vs,
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+        patch("lovli.chain.load_catalog"),
+    ):
         mock_vectorstore = MagicMock()
         mock_vs.return_value = mock_vectorstore
         base_retriever = MagicMock()
@@ -262,10 +289,12 @@ def test_invoke_retriever_falls_back_when_filtered_empty(mock_settings):
 
 def test_extract_sources_includes_doc_type(mock_settings):
     """Source extraction should carry doc_type for downstream formatting/eval."""
-    with patch('lovli.chain.QdrantVectorStore'), \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'):
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
         chain = LegalRAGChain(mock_settings)
         doc = Mock(
             metadata={
@@ -284,10 +313,12 @@ def test_extract_sources_includes_doc_type(mock_settings):
 
 def test_prioritize_doc_types_adaptive_budget(mock_settings):
     """Prioritization is a pass-through for attached-editorial model."""
-    with patch('lovli.chain.QdrantVectorStore'), \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'):
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
         chain = LegalRAGChain(mock_settings)
         docs = [
             Mock(metadata={"article_id": "art-1", "doc_type": "provision"}),
@@ -307,10 +338,12 @@ def test_prioritize_doc_types_adaptive_budget(mock_settings):
 
 def test_format_context_renders_inline_editorial_notes(mock_settings):
     """Context formatter should render editorial notes inline per provision."""
-    with patch('lovli.chain.QdrantVectorStore'), \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'):
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
         chain = LegalRAGChain(mock_settings)
         sources = [
             {
@@ -334,10 +367,12 @@ def test_format_context_renders_inline_editorial_notes(mock_settings):
 
 def test_attach_editorial_to_provisions_includes_linked_notes(mock_settings):
     """Retrieved provisions should carry attached editorial notes in metadata."""
-    with patch('lovli.chain.QdrantVectorStore'), \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'):
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
         chain = LegalRAGChain(mock_settings)
         provision_doc = Mock(
             metadata={
@@ -370,10 +405,12 @@ def test_attach_editorial_to_provisions_includes_linked_notes(mock_settings):
 
 def test_attach_editorial_to_provisions_keeps_score_alignment(mock_settings):
     """Dropping editorial docs must preserve provision score alignment for gating."""
-    with patch('lovli.chain.QdrantVectorStore'), \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'):
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
         chain = LegalRAGChain(mock_settings)
         provision_doc = Mock(
             metadata={
@@ -404,10 +441,12 @@ def test_attach_editorial_to_provisions_keeps_score_alignment(mock_settings):
 
 def test_prioritize_doc_types_no_editorial_edge_case(mock_settings):
     """Prioritization returns empty scores when score/doc lengths mismatch."""
-    with patch('lovli.chain.QdrantVectorStore'), \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'):
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
         chain = LegalRAGChain(mock_settings)
         docs = [
             Mock(metadata={"article_id": "p-1", "doc_type": "provision"}),
@@ -425,10 +464,12 @@ def test_prioritize_doc_types_no_editorial_edge_case(mock_settings):
 
 def test_fetch_editorial_for_chapters_fallback_on_filter_error(mock_settings):
     """Editorial fetch should fail open when filtered scroll is unsupported."""
-    with patch('lovli.chain.QdrantVectorStore') as mock_vs, \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'):
+    with (
+        patch("lovli.chain.QdrantVectorStore") as mock_vs,
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
         vectorstore = MagicMock()
         vectorstore.client = MagicMock()
         vectorstore.client.scroll.side_effect = Exception("Index required but not found")
@@ -440,10 +481,12 @@ def test_fetch_editorial_for_chapters_fallback_on_filter_error(mock_settings):
 
 def test_fetch_editorial_for_provisions_fallback_on_filter_error(mock_settings):
     """Linked editorial fetch should fail open when filtered scroll is unsupported."""
-    with patch('lovli.chain.QdrantVectorStore') as mock_vs, \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'):
+    with (
+        patch("lovli.chain.QdrantVectorStore") as mock_vs,
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
         vectorstore = MagicMock()
         vectorstore.client = MagicMock()
         vectorstore.client.scroll.side_effect = Exception("Index required but not found")
@@ -456,10 +499,12 @@ def test_fetch_editorial_for_provisions_fallback_on_filter_error(mock_settings):
 def test_retrieve_attaches_editorial_notes_before_extracting_sources(mock_settings):
     """Non-reranker path should attach editorial notes to provision metadata."""
     mock_settings.reranker_enabled = False
-    with patch('lovli.chain.QdrantVectorStore') as mock_vs, \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'):
+    with (
+        patch("lovli.chain.QdrantVectorStore") as mock_vs,
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
         vectorstore = MagicMock()
         retriever = MagicMock()
         provision_doc = Mock(
@@ -497,13 +542,31 @@ def test_retrieve_attaches_editorial_notes_before_extracting_sources(mock_settin
 
 def test_attach_editorial_chapter_fallback_skips_ambiguous_chapter(mock_settings):
     """Chapter fallback should not attach notes when multiple provisions share chapter."""
-    with patch('lovli.chain.QdrantVectorStore'), \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'):
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
         chain = LegalRAGChain(mock_settings)
-        p1 = Mock(metadata={"law_id": "nl-19990326-017", "chapter_id": "kapittel-9", "article_id": "p-1", "doc_type": "provision"}, page_content="p1")
-        p2 = Mock(metadata={"law_id": "nl-19990326-017", "chapter_id": "kapittel-9", "article_id": "p-2", "doc_type": "provision"}, page_content="p2")
+        p1 = Mock(
+            metadata={
+                "law_id": "nl-19990326-017",
+                "chapter_id": "kapittel-9",
+                "article_id": "p-1",
+                "doc_type": "provision",
+            },
+            page_content="p1",
+        )
+        p2 = Mock(
+            metadata={
+                "law_id": "nl-19990326-017",
+                "chapter_id": "kapittel-9",
+                "article_id": "p-2",
+                "doc_type": "provision",
+            },
+            page_content="p2",
+        )
         chapter_editorial = Mock(
             metadata={
                 "law_id": "nl-19990326-017",
@@ -523,10 +586,12 @@ def test_attach_editorial_chapter_fallback_skips_ambiguous_chapter(mock_settings
 def test_attach_editorial_skips_v2_fetch_when_compat_disabled(mock_settings):
     """When compat mode is off, attachment should not trigger runtime fetch methods."""
     mock_settings.editorial_v2_compat_mode = False
-    with patch('lovli.chain.QdrantVectorStore'), \
-         patch('lovli.chain.HuggingFaceEmbeddings'), \
-         patch('lovli.chain.ChatOpenAI'), \
-         patch('lovli.chain.QdrantClient'):
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
         chain = LegalRAGChain(mock_settings)
         provision_doc = Mock(
             metadata={

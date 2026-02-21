@@ -144,11 +144,19 @@ def _precompute_cache_key(
     fallback_unfiltered: bool,
     reranker_ctx_enabled: bool,
     dualpass_enabled: bool,
+    reranker_model: str = "",
+    law_routing_reranker_enabled: bool = False,
 ) -> str:
-    """Deterministic cache key for precomputed candidates. Invalidation on any input change."""
+    """Deterministic cache key for precomputed candidates. Invalidation on any input change.
+
+    Includes reranker_model and law_routing_reranker_enabled so that changes to
+    the reranker config (e.g. disabling law-routing reranker) bust the cache and
+    prevent stale fp16-collapsed scores from being reused across runs.
+    """
     blob = (
         f"{questions_sha256}|{git_commit}|{qdrant_collection}|{max_k_initial}|"
-        f"{fallback_unfiltered}|{reranker_ctx_enabled}|{dualpass_enabled}"
+        f"{fallback_unfiltered}|{reranker_ctx_enabled}|{dualpass_enabled}|"
+        f"{reranker_model}|{law_routing_reranker_enabled}"
     )
     return hashlib.sha256(blob.encode()).hexdigest()[:24]
 
@@ -1203,6 +1211,10 @@ def main() -> None:
             fallback_unfiltered,
             reranker_ctx_enabled,
             dualpass_enabled,
+            reranker_model=settings.reranker_model,
+            law_routing_reranker_enabled=bool(
+                getattr(settings, "law_routing_reranker_enabled", False)
+            ),
         )
         cache_path = None
         if cache_dir:

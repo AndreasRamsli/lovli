@@ -99,7 +99,7 @@ class Settings(BaseSettings):
         default="2026-02-16",
         description="Version tag for the active trust profile.",
     )
-    
+
     # Reranker Configuration
     reranker_model: str = Field(
         default="BAAI/bge-reranker-v2-m3",
@@ -154,8 +154,7 @@ class Settings(BaseSettings):
         default=0.70,
         ge=0.0,
         le=1.0,
-        description="Only apply ambiguity gating when top score is at or below this "
-        "ceiling.",
+        description="Only apply ambiguity gating when top score is at or below this ceiling.",
     )
     editorial_notes_per_provision_cap: int = Field(
         default=3,
@@ -178,6 +177,16 @@ class Settings(BaseSettings):
     law_routing_enabled: bool = Field(
         default=False,
         description="Enable lightweight law routing before retrieval using the law catalog.",
+    )
+    law_routing_reranker_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable cross-encoder reranker scoring for law-level routing. "
+            "When False (default), routing uses lexical token-overlap only. "
+            "bge-reranker-v2-m3 produces near-zero logits for catalog summary pairs, "
+            "causing all law scores to collapse to ~0.5 and triggering universal uncertainty "
+            "fallback. Disable unless a routing-specific reranker is available."
+        ),
     )
     law_catalog_path: str = Field(
         default="data/law_catalog.json",
@@ -408,9 +417,7 @@ class Settings(BaseSettings):
     def validate_openrouter_key(cls, v: str) -> str:
         """Validate that OpenRouter API key is provided."""
         if not v or v.strip() == "":
-            raise ValueError(
-                "OPENROUTER_API_KEY is required. Please set it in your .env file."
-            )
+            raise ValueError("OPENROUTER_API_KEY is required. Please set it in your .env file.")
         return v.strip()
 
 

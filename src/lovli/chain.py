@@ -203,12 +203,12 @@ class LegalRAGChain:
                 logger.info(
                     "Loading reranker model: %s on %s", self.settings.reranker_model, device
                 )
-                # Force fp32 to avoid sigmoid collapse from fp16 quantisation on GPU
-                # (fp16 compresses logits near zero → sigmoid ≈ 0.5 for all candidates)
+                # Force fp32 via model_kwargs (automodel_args was renamed in sentence-transformers>=5)
+                # This prevents fp16 sigmoid collapse on GPU where logits compress near zero.
                 self.reranker = CrossEncoder(
                     self.settings.reranker_model,
                     device=device,
-                    automodel_args={"torch_dtype": torch.float32},
+                    model_kwargs={"torch_dtype": torch.float32},
                 )
                 logger.info("Reranker loaded successfully on %s", device)
             except Exception as e:
@@ -295,11 +295,20 @@ Kontekst fra lovtekster:
     def _score_law_candidates_reranker(
         self, query: str, candidates: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """Apply law-level reranker scoring to lexical candidates."""
+        """Apply law-level reranker scoring to lexical candidates.
+
+        When ``law_routing_reranker_enabled`` is False (default) the reranker is
+        bypassed entirely and all ``law_reranker_score`` values are set to None,
+        which causes ``_route_law_ids`` to fall through to pure lexical routing.
+        bge-reranker-v2-m3 produces near-zero logits (~sigmoid→0.5) for law-catalog
+        summary pairs, making the reranker unable to distinguish between laws and
+        triggering universal uncertainty fallback (18/20 questions).
+        """
+        routing_reranker = self.reranker if self.settings.law_routing_reranker_enabled else None
         return score_law_candidates_reranker(
             query,
             candidates,
-            self.reranker,
+            routing_reranker,
             dualpass_enabled=bool(self.settings.law_routing_summary_dualpass_enabled),
             summary_weight=max(0.0, float(self.settings.law_routing_dualpass_summary_weight)),
             title_weight=max(0.0, float(self.settings.law_routing_dualpass_title_weight)),
