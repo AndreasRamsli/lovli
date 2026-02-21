@@ -200,11 +200,13 @@ class LegalRAGChain:
                 import torch
 
                 device = "cuda" if torch.cuda.is_available() else "cpu"
-                logger.info(f"Loading reranker model: {self.settings.reranker_model} on {device}")
+                logger.info(
+                    "Loading reranker model: %s on %s", self.settings.reranker_model, device
+                )
                 self.reranker = CrossEncoder(self.settings.reranker_model, device=device)
                 logger.info("Reranker loaded successfully on %s", device)
             except Exception as e:
-                logger.warning(f"Failed to load reranker, continuing without reranking: {e}")
+                logger.warning("Failed to load reranker, continuing without reranking: %s", e)
                 self.reranker = None
 
         # Prompt template
