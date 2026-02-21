@@ -203,7 +203,13 @@ class LegalRAGChain:
                 logger.info(
                     "Loading reranker model: %s on %s", self.settings.reranker_model, device
                 )
-                self.reranker = CrossEncoder(self.settings.reranker_model, device=device)
+                # Force fp32 to avoid sigmoid collapse from fp16 quantisation on GPU
+                # (fp16 compresses logits near zero → sigmoid ≈ 0.5 for all candidates)
+                self.reranker = CrossEncoder(
+                    self.settings.reranker_model,
+                    device=device,
+                    automodel_args={"torch_dtype": torch.float32},
+                )
                 logger.info("Reranker loaded successfully on %s", device)
             except Exception as e:
                 logger.warning("Failed to load reranker, continuing without reranking: %s", e)

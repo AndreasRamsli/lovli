@@ -1172,6 +1172,13 @@ def main() -> None:
     )
     logger.info("Starting retrieval sweep...")
     chain = LegalRAGChain(settings=settings)
+    # After the main chain loads all models from HuggingFace, switch to offline mode so
+    # parallel precompute workers (which create fresh LegalRAGChain instances) load from
+    # the local disk cache rather than hitting the HF Hub API and triggering 429 rate limits.
+    if os.environ.get("HF_HUB_OFFLINE") != "0":
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+        logger.info("HF Hub offline mode enabled for parallel workers")
     skip_index_scan = _env_flag("SWEEP_SKIP_INDEX_SCAN", default=True)
     validate_questions(questions, chain, skip_index_scan=skip_index_scan)
     max_k_initial = max(retrieval_k_initial_values)
