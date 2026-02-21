@@ -277,6 +277,12 @@ Kontekst fra lovtekster:
                 # Build embedding index for semantic law routing if enabled.
                 # Law texts are embedded once here and cosine similarity is computed
                 # per query — much faster than re-embedding at query time.
+                #
+                # TODO(perf): On CPU this takes ~30-90s for 4427 laws (BGE-M3 is
+                # 570M params). For production CPU deployments, serialize the index
+                # to disk (numpy + catalog checksum) and reload on subsequent starts.
+                # On GPU (H100/A100) the full embed takes ~2-4s — acceptable.
+                # Track at: https://github.com/AndreasRamsli/lovli/issues
                 if self.settings.law_routing_embedding_enabled:
                     try:
                         self._law_catalog_entries = build_law_embedding_index(
