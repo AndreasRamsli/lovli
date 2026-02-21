@@ -78,7 +78,7 @@ Build the robust, multi-stage pipeline for full-corpus retrieval.
 
 ### Retrieval Stages
 - [x] **Query analysis**: Classify query type (section lookup, legal question, concept explanation), extract explicit references, detect legal domain, rewrite follow-ups.
-- [x] **Law routing**: Hybrid lexical + reranker law routing with staged uncertainty fallback and explicit fallback-stage diagnostics.
+- [x] **Law routing**: Hybrid BGE-M3 embedding + lexical law routing with staged uncertainty fallback and explicit fallback-stage diagnostics. (Note: cross-encoder reranker was investigated for this role but is unsuitable — it produces near-zero logits for catalog summary pairs, causing universal uncertainty fallback. BGE-M3 embedding cosine similarity is the correct model for catalog-level routing.)
 - [x] **Filtered hybrid search**: Search article index filtered to candidate laws, combining semantic and keyword matching.
 - [x] **Reranking**: Cross-encoder rescoring of candidates.
 - [x] **Editorial context policy**: Keep provisions primary and attach normalized editorial-note payloads per provision (with compatibility fallback).
@@ -105,7 +105,9 @@ Build the robust, multi-stage pipeline for full-corpus retrieval.
 ### Current codebase status (Feb 2026)
 - Runtime/eval parity has been improved for post-rerank logic (coherence + fusion + uncertainty cap).
 - Confidence gating semantics are now explicitly CE-score based.
-- Full end-to-end colab validation for all new controls remains an ongoing operational task.
+- Law routing refactored from cross-encoder to BGE-M3 embedding hybrid after diagnosing reranker task mismatch causing 69% unexpected citation rate (see `docs/STATUS_2026-02-21.md`).
+- Precompute cache key hardened to include reranker config; stale cache no longer masks code changes.
+- Full end-to-end colab validation with new embedding routing pending (next run will confirm metrics improvement).
 
 ## Future Ideas (Post Full-Corpus)
 - **GraphRAG**: Map dependency graph between laws using parsed cross-references.

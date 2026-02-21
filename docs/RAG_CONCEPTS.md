@@ -35,11 +35,21 @@ Before any retrieval, the LLM analyzes the user's question:
 - **Follow-up rewriting**: If this is a follow-up in a conversation, rewrite it to be self-contained (e.g., "What's the deadline for that?" -> "What's the deadline for rent increases under husleieloven?").
 
 ### Stage 2: Law Routing (Implemented, Optional)
-For questions where the relevant law isn't obvious, the system can route retrieval through a lightweight law-catalog stage:
+For questions where the relevant law isn't obvious, the system routes retrieval through a lightweight law-catalog stage before hitting the Qdrant index.
 
-- **Lexical prefilter**: token overlap and direct law-name mention checks over catalog entries.
-- **Law-level reranking**: optional cross-encoder scoring of routed law candidates.
-- **Uncertainty fallback**: when top law scores are weak/close, routing can fall back to unfiltered retrieval (or broadened candidate laws).
+**Current approach — Hybrid embedding + lexical routing:**
+
+1. **Lexical prefilter**: Token overlap and direct law-name mention checks narrow the catalog (~4427 laws) to a short candidate list (≤80 entries). Fast, zero-cost, catches direct name mentions ("husleieloven").
+
+2. **Embedding similarity scoring**: At startup, all law `routing_summary_text` fields are embedded with BGE-M3 (the same model already loaded for retrieval) and stored as float vectors. At query time, the query embedding is compared against all law embeddings via cosine similarity. BGE-M3 is a bi-encoder trained for exactly this retrieval task — computing semantic similarity between a query and a corpus of descriptions.
+
+3. **Hybrid blend**: `score = embedding_sim × 0.7 + normalized_lexical × 0.3`. The lexical component provides a keyword-match bonus (e.g. "husleieloven" in the query bumps that law regardless of embedding distance).
+
+4. **Uncertainty fallback**: when top law scores are weak or too close (configurable thresholds), routing can fall back to broadened retrieval or fully unfiltered retrieval to avoid over-filtering.
+
+**Why not the cross-encoder reranker for routing?**
+
+`bge-reranker-v2-m3` is designed for re-scoring a short list of (query, short passage) pairs — article-level reranking. When fed (query, law catalog summary) pairs, it produces near-zero logits for all candidates (all sigmoid-normalized scores cluster at ~0.5001), providing no useful discrimination between laws. This causes every routing decision to be flagged as uncertain and fall through to unfiltered retrieval, flooding the context with articles from all laws. The bi-encoder embedding approach avoids this task mismatch.
 
 This stage is configurable (`LAW_ROUTING_ENABLED`) and defaults to safe fallback behavior to avoid over-filtering.
 

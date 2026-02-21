@@ -47,7 +47,7 @@ Lovli is an LLM-powered legal information tool using a multi-stage Retrieval-Aug
 ## Retrieval Pipeline
 
 ### Current
-Multi-stage retrieval: query rewrite -> optional law routing -> hybrid retrieval -> reranking -> law coherence filtering -> generation.
+Multi-stage retrieval: query rewrite → optional law routing (BGE-M3 embedding hybrid) → hybrid retrieval → cross-encoder reranking → law coherence filtering → law-aware rank fusion → generation.
 
 ### Target Architecture
 ```
@@ -56,22 +56,29 @@ User Question
     v
 Query Rewrite + Validation
     |
-    +-- Optional Law Routing (lexical prefilter + law-level reranker)
-    |      with uncertainty fallback
-            |
-            v
-      Hybrid Search (dense + sparse, filtered by law)
-            |
-            v
-      Reranking (cross-encoder, top 5)
-            |
-            v
-      Law Coherence Filtering
-      (remove weak singleton sources from non-dominant laws)
-            |
-            v
-      Answer Generation (streaming, with confidence/ambiguity gating)
+    +-- Optional Law Routing (lexical prefilter + BGE-M3 embedding similarity)
+    |      Hybrid score = embedding_cosine × 0.7 + normalized_lexical × 0.3
+    |      Uncertainty fallback: broadened or unfiltered retrieval
+    |
+    v
+Hybrid Search (dense + sparse, filtered by routed laws)
+    |
+    v
+Reranking (cross-encoder bge-reranker-v2-m3, document-level)
+    |
+    v
+Law Coherence Filtering
+(remove weak singleton sources from non-dominant laws)
+    |
+    v
+Law-Aware Rank Fusion
+(combine CE score, routing alignment, affinity, dominance)
+    |
+    v
+Answer Generation (streaming, with confidence/ambiguity gating)
 ```
+
+**Note on routing model choice:** The cross-encoder reranker (`bge-reranker-v2-m3`) is used for *document-level* reranking (Stage 4) where it performs well. It is explicitly **not** used for law routing because it produces near-zero logits (~sigmoid=0.5) for all law catalog summary pairs — a task mismatch. Law routing uses BGE-M3 embedding cosine similarity instead, which is the correct model family for bi-encoder retrieval over a law catalog.
 
 ## Infrastructure
 - **Local Development**: Python environment, no local GPU required.
@@ -85,5 +92,6 @@ Query Rewrite + Validation
 - **Model Flexibility**: OpenRouter provides access to 100+ models through a single API, allowing easy model switching and benchmarking.
 - **Norwegian Support**: BGE-M3 and bge-reranker-v2-m3 are multilingual models with strong Norwegian performance.
 - **Hybrid Search**: Legal text requires both semantic understanding ("tenant rights" ~ "leietakers rettigheter") and exact matching ("§ 3-5"). BGE-M3's dual dense+sparse output makes this seamless in Qdrant.
-- **Law-first guardrails**: Routing + reranker + coherence filtering reduce cross-law contamination in a 735+ law corpus.
-- **Evaluation-Driven**: Every architectural change is measured via LangSmith experiments. We only keep changes that improve eval scores.
+- **Law-first guardrails**: Routing + coherence filtering + rank fusion reduce cross-law contamination in a 4427-law corpus.
+- **Right model for the right task**: BGE-M3 (bi-encoder) is used for law routing (catalog-level similarity); bge-reranker-v2-m3 (cross-encoder) is used only for article-level reranking where it was trained. Using the cross-encoder for catalog routing causes all scores to collapse near 0.5 (task mismatch), triggering universal uncertainty fallback and 69% unexpected citation rate.
+- **Evaluation-Driven**: Every architectural change is measured via sweep + contamination analysis. Changes are only kept when eval metrics improve.
