@@ -182,10 +182,38 @@ class Settings(BaseSettings):
         default=False,
         description=(
             "Enable cross-encoder reranker scoring for law-level routing. "
-            "When False (default), routing uses lexical token-overlap only. "
+            "When False (default), routing uses embedding similarity + lexical overlap. "
             "bge-reranker-v2-m3 produces near-zero logits for catalog summary pairs, "
             "causing all law scores to collapse to ~0.5 and triggering universal uncertainty "
             "fallback. Disable unless a routing-specific reranker is available."
+        ),
+    )
+    law_routing_embedding_enabled: bool = Field(
+        default=True,
+        description=(
+            "Enable BGE-M3 embedding cosine similarity for law-level routing. "
+            "Law routing texts are embedded once at startup and cached. At query time, "
+            "the query embedding is compared against all law embeddings to rank candidates. "
+            "Blended with lexical token-overlap using law_routing_embedding_weight."
+        ),
+    )
+    law_routing_embedding_weight: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Blend weight for embedding cosine similarity in hybrid law routing. "
+            "Final score = embedding_sim * weight + normalized_lexical * (1 - weight). "
+            "Higher values favour semantic similarity; lower values favour keyword overlap."
+        ),
+    )
+    law_routing_embedding_text_field: str = Field(
+        default="routing_summary_text",
+        description=(
+            "Which routing text field to embed for law-level similarity scoring. "
+            "Options: 'routing_text' (full), 'routing_summary_text' (summary+area+chapters), "
+            "'routing_title_text' (title+short_name+ref). "
+            "routing_summary_text is recommended: focused, avoids noisy keywords."
         ),
     )
     law_catalog_path: str = Field(

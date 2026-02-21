@@ -7,8 +7,9 @@ making them independently testable and reusable by the sweep script.
 from __future__ import annotations
 
 import logging
+import math
 import re
-from typing import Any
+from typing import Any, Callable
 
 from .scoring import normalize_sigmoid_scores
 
@@ -316,6 +317,154 @@ def score_law_candidates_reranker(
         reverse=True,
     )
     return reranked
+
+
+# ---------------------------------------------------------------------------
+# Embedding-based routing
+# ---------------------------------------------------------------------------
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Compute cosine similarity between two dense vectors."""
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def build_law_embedding_index(
+    catalog_entries: list[dict[str, Any]],
+    embed_documents: Callable[[list[str]], list[list[float]]],
+    text_field: str = "routing_summary_text",
+    batch_size: int = 64,
+) -> list[dict[str, Any]]:
+    """Embed law routing texts and attach the embedding vectors to each entry.
+
+    Called once at catalog load time. Returns a new list of entries with an
+    ``embedding`` key added. Entries without a non-empty text in ``text_field``
+    fall back to ``routing_text``, then ``routing_title_text``.
+
+    Args:
+        catalog_entries: Precomputed routing entries from ``build_routing_entries``.
+        embed_documents: Callable that takes a list of strings and returns a list
+            of float vectors (e.g. ``HuggingFaceEmbeddings.embed_documents``).
+        text_field: Which routing text field to embed (default: routing_summary_text).
+        batch_size: Batch size passed to the embedding model.
+
+    Returns:
+        Entries with ``embedding`` list[float] attached.
+    """
+    if not catalog_entries:
+        return catalog_entries
+
+    texts: list[str] = []
+    for entry in catalog_entries:
+        text = (entry.get(text_field) or "").strip()
+        if not text:
+            text = (entry.get("routing_text") or "").strip()
+        if not text:
+            text = (entry.get("routing_title_text") or entry.get("law_title") or "").strip()
+        texts.append(text)
+
+    # Embed in batches to avoid OOM on large catalogs
+    all_embeddings: list[list[float]] = []
+    for start in range(0, len(texts), batch_size):
+        batch = texts[start : start + batch_size]
+        try:
+            batch_embs = embed_documents(batch)
+            all_embeddings.extend(batch_embs)
+        except Exception as exc:
+            logger.warning(
+                "Law embedding batch %d-%d failed: %s — filling with zeros",
+                start,
+                start + len(batch),
+                exc,
+            )
+            dim = len(all_embeddings[0]) if all_embeddings else 1024
+            all_embeddings.extend([[0.0] * dim for _ in batch])
+
+    indexed: list[dict[str, Any]] = []
+    for entry, emb in zip(catalog_entries, all_embeddings):
+        new_entry = dict(entry)
+        new_entry["embedding"] = emb
+        indexed.append(new_entry)
+
+    logger.info("Built law embedding index: %d laws embedded (field=%s)", len(indexed), text_field)
+    return indexed
+
+
+def score_law_candidates_embedding(
+    query_embedding: list[float],
+    candidates: list[dict[str, Any]],
+    *,
+    embedding_weight: float = 0.7,
+    max_lexical_score: float = 10.0,
+) -> list[dict[str, Any]]:
+    """Score law candidates using embedding cosine similarity blended with lexical overlap.
+
+    Pure function — takes a pre-computed query embedding so the embed call
+    happens once outside and can be mocked in tests.
+
+    Scoring formula::
+
+        norm_lexical  = min(lexical_score, max_lexical_score) / max_lexical_score
+        hybrid_score  = embedding_sim * w + norm_lexical * (1 - w)
+
+    The result is stored in ``law_reranker_score`` so the rest of the routing
+    pipeline (confidence thresholds, uncertainty detection, alignment map) is
+    unchanged.
+
+    Args:
+        query_embedding: Dense float vector for the query.
+        candidates: Lexical candidates (must have ``embedding`` key from
+            ``build_law_embedding_index``).
+        embedding_weight: Blend weight for embedding similarity [0, 1].
+        max_lexical_score: Normalisation ceiling for lexical overlap scores.
+
+    Returns:
+        Candidates sorted descending by ``law_reranker_score``.
+    """
+    if not candidates:
+        return candidates
+
+    lexical_w = max(0.0, min(1.0, 1.0 - embedding_weight))
+    embed_w = max(0.0, min(1.0, float(embedding_weight)))
+
+    scored: list[dict[str, Any]] = []
+    for candidate in candidates:
+        emb = candidate.get("embedding")
+        if emb is None:
+            # Fallback: lexical only
+            lex = float(candidate.get("lexical_score", 0))
+            hybrid = min(1.0, lex / max(max_lexical_score, 1.0))
+        else:
+            try:
+                sim = _cosine_similarity(query_embedding, emb)
+                # Clamp to [0, 1] — cosine can be negative for unrelated texts
+                sim = max(0.0, min(1.0, sim))
+            except Exception:
+                sim = 0.0
+            lex = float(candidate.get("lexical_score", 0))
+            norm_lex = min(1.0, lex / max(max_lexical_score, 1.0))
+            hybrid = embed_w * sim + lexical_w * norm_lex
+
+        item = dict(candidate)
+        item["law_embedding_sim"] = float(
+            _cosine_similarity(query_embedding, emb) if emb is not None else 0.0
+        )
+        item["law_reranker_score"] = hybrid
+        scored.append(item)
+
+    scored.sort(
+        key=lambda c: (
+            c.get("law_reranker_score", 0.0),
+            c.get("lexical_score", 0),
+        ),
+        reverse=True,
+    )
+    return scored
 
 
 # ---------------------------------------------------------------------------

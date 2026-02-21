@@ -1,9 +1,11 @@
 """Tests for LegalRAGChain."""
 
+import math
 import pytest
 from unittest.mock import Mock, MagicMock, patch
 from lovli.chain import LegalRAGChain
 from lovli.config import Settings
+from lovli.routing import score_law_candidates_embedding, build_law_embedding_index
 
 
 @pytest.fixture
@@ -54,6 +56,9 @@ def mock_settings():
     settings.law_routing_dualpass_title_weight = 0.35
     settings.law_routing_dualpass_fulltext_weight = 0.20
     settings.law_routing_reranker_enabled = False
+    settings.law_routing_embedding_enabled = False
+    settings.law_routing_embedding_weight = 0.7
+    settings.law_routing_embedding_text_field = "routing_summary_text"
     return settings
 
 
@@ -260,6 +265,81 @@ def test_route_law_ids_matches_catalog_tokens(mock_settings):
         routed = chain._route_law_ids("Hva sier husleieloven om depositum?")
         assert routed
         assert routed[0] == "nl-19990326-017"
+
+
+# ---------------------------------------------------------------------------
+# Embedding-based law routing unit tests
+# ---------------------------------------------------------------------------
+
+
+def _make_unit_vec(dim: int, hot: int) -> list[float]:
+    """Unit vector with 1.0 at position ``hot`` and 0 elsewhere."""
+    v = [0.0] * dim
+    v[hot] = 1.0
+    return v
+
+
+def test_score_law_candidates_embedding_ranks_by_cosine():
+    """Candidates closer to query embedding should rank higher."""
+    dim = 4
+    candidates = [
+        {"law_id": "law-a", "lexical_score": 1, "embedding": _make_unit_vec(dim, 0)},
+        {"law_id": "law-b", "lexical_score": 1, "embedding": _make_unit_vec(dim, 1)},
+        {"law_id": "law-c", "lexical_score": 1, "embedding": _make_unit_vec(dim, 2)},
+    ]
+    # Query points toward law-b (dimension 1)
+    query_emb = _make_unit_vec(dim, 1)
+    result = score_law_candidates_embedding(query_emb, candidates, embedding_weight=1.0)
+    assert result[0]["law_id"] == "law-b"
+    assert result[0]["law_reranker_score"] > result[1]["law_reranker_score"]
+
+
+def test_score_law_candidates_embedding_lexical_boost():
+    """Higher lexical score should break ties when embeddings are equally similar."""
+    dim = 4
+    # Both candidates are equidistant from query (same cosine)
+    q = [1.0, 0.0, 0.0, 0.0]
+    candidates = [
+        {"law_id": "lex-low", "lexical_score": 1, "embedding": q[:]},
+        {"law_id": "lex-high", "lexical_score": 5, "embedding": q[:]},
+    ]
+    result = score_law_candidates_embedding(q, candidates, embedding_weight=0.7)
+    # lex-high has higher normalised lexical score → should rank first
+    assert result[0]["law_id"] == "lex-high"
+
+
+def test_score_law_candidates_embedding_no_embedding_falls_back():
+    """Candidates without embedding key should still get a score from lexical alone."""
+    q = [1.0, 0.0]
+    candidates = [
+        {"law_id": "no-emb", "lexical_score": 3},
+        {"law_id": "has-emb", "lexical_score": 1, "embedding": [1.0, 0.0]},
+    ]
+    result = score_law_candidates_embedding(q, candidates, embedding_weight=0.7)
+    # Both should have a law_reranker_score
+    assert all(c.get("law_reranker_score") is not None for c in result)
+
+
+def test_build_law_embedding_index_attaches_embeddings():
+    """build_law_embedding_index should attach embedding vectors to each entry."""
+    entries = [
+        {"law_id": "a", "routing_summary_text": "Husleie regler", "routing_text": "full text a"},
+        {"law_id": "b", "routing_summary_text": "Arbeidsrett", "routing_text": "full text b"},
+    ]
+
+    def fake_embed(texts: list[str]) -> list[list[float]]:
+        return [[float(i)] * 4 for i in range(len(texts))]
+
+    indexed = build_law_embedding_index(entries, fake_embed, text_field="routing_summary_text")
+    assert len(indexed) == 2
+    assert all("embedding" in e for e in indexed)
+    assert len(indexed[0]["embedding"]) == 4
+
+
+def test_score_law_candidates_embedding_empty():
+    """Empty candidates list should return empty list without error."""
+    result = score_law_candidates_embedding([1.0, 0.0], [], embedding_weight=0.7)
+    assert result == []
 
 
 def test_invoke_retriever_falls_back_when_filtered_empty(mock_settings):

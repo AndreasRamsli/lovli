@@ -28,7 +28,9 @@ from .scoring import (
     _infer_doc_type,
 )
 from .routing import (
+    build_law_embedding_index,
     build_routing_entries,
+    score_law_candidates_embedding,
     score_law_candidates_lexical,
     score_law_candidates_reranker,
     compute_routing_alignment,
@@ -272,6 +274,22 @@ Kontekst fra lovtekster:
                     len(self._law_catalog),
                     self.settings.law_catalog_path,
                 )
+                # Build embedding index for semantic law routing if enabled.
+                # Law texts are embedded once here and cosine similarity is computed
+                # per query — much faster than re-embedding at query time.
+                if self.settings.law_routing_embedding_enabled:
+                    try:
+                        self._law_catalog_entries = build_law_embedding_index(
+                            self._law_catalog_entries,
+                            embed_documents=self.embeddings.embed_documents,
+                            text_field=self.settings.law_routing_embedding_text_field,
+                        )
+                    except Exception as emb_err:
+                        logger.warning(
+                            "Law embedding index build failed (%s). "
+                            "Routing will fall back to lexical-only.",
+                            emb_err,
+                        )
             except Exception as e:
                 logger.warning(
                     "Law routing enabled but catalog could not be loaded (%s). "
@@ -295,25 +313,56 @@ Kontekst fra lovtekster:
     def _score_law_candidates_reranker(
         self, query: str, candidates: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """Apply law-level reranker scoring to lexical candidates.
+        """Score law candidates for routing — embedding hybrid, cross-encoder, or lexical.
 
-        When ``law_routing_reranker_enabled`` is False (default) the reranker is
-        bypassed entirely and all ``law_reranker_score`` values are set to None,
-        which causes ``_route_law_ids`` to fall through to pure lexical routing.
-        bge-reranker-v2-m3 produces near-zero logits (~sigmoid→0.5) for law-catalog
-        summary pairs, making the reranker unable to distinguish between laws and
-        triggering universal uncertainty fallback (18/20 questions).
+        Priority order:
+        1. Embedding hybrid (default, ``law_routing_embedding_enabled=True``):
+           BGE-M3 cosine similarity blended with lexical overlap. Meaningful
+           semantic scores; avoids the cross-encoder task mismatch for catalog texts.
+        2. Cross-encoder reranker (``law_routing_reranker_enabled=True``):
+           bge-reranker-v2-m3. Only useful if a routing-specific model is loaded;
+           the document reranker produces near-zero logits for catalog summary pairs.
+        3. Lexical only (both disabled): all ``law_reranker_score`` set to None,
+           routing falls through to token-overlap top-k selection.
         """
-        routing_reranker = self.reranker if self.settings.law_routing_reranker_enabled else None
-        return score_law_candidates_reranker(
-            query,
-            candidates,
-            routing_reranker,
-            dualpass_enabled=bool(self.settings.law_routing_summary_dualpass_enabled),
-            summary_weight=max(0.0, float(self.settings.law_routing_dualpass_summary_weight)),
-            title_weight=max(0.0, float(self.settings.law_routing_dualpass_title_weight)),
-            fulltext_weight=max(0.0, float(self.settings.law_routing_dualpass_fulltext_weight)),
-        )
+        # --- Embedding hybrid path (preferred) ---
+        if self.settings.law_routing_embedding_enabled:
+            # Check that at least one candidate has an embedding (index was built)
+            has_embeddings = any(c.get("embedding") is not None for c in candidates[:5])
+            if has_embeddings:
+                try:
+                    query_embedding = self.embeddings.embed_query(query)
+                    return score_law_candidates_embedding(
+                        query_embedding,
+                        candidates,
+                        embedding_weight=float(self.settings.law_routing_embedding_weight),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Embedding law routing failed (%s); falling back to lexical.", exc
+                    )
+            else:
+                logger.warning(
+                    "Embedding routing enabled but no embeddings found in catalog entries. "
+                    "Was build_law_embedding_index called? Falling back to lexical."
+                )
+
+        # --- Cross-encoder path (opt-in, rarely useful for catalog texts) ---
+        if self.settings.law_routing_reranker_enabled:
+            return score_law_candidates_reranker(
+                query,
+                candidates,
+                self.reranker,
+                dualpass_enabled=bool(self.settings.law_routing_summary_dualpass_enabled),
+                summary_weight=max(0.0, float(self.settings.law_routing_dualpass_summary_weight)),
+                title_weight=max(0.0, float(self.settings.law_routing_dualpass_title_weight)),
+                fulltext_weight=max(0.0, float(self.settings.law_routing_dualpass_fulltext_weight)),
+            )
+
+        # --- Lexical-only fallback ---
+        for candidate in candidates:
+            candidate["law_reranker_score"] = None
+        return candidates
 
     def _validate_question(self, question: str) -> str:
         """Validate and normalize question input."""
