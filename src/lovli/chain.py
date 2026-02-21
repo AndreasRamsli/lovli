@@ -197,9 +197,12 @@ class LegalRAGChain:
         self.reranker = None
         if self.settings.reranker_enabled:
             try:
-                logger.info(f"Loading reranker model: {self.settings.reranker_model}")
-                self.reranker = CrossEncoder(self.settings.reranker_model)
-                logger.info("Reranker loaded successfully")
+                import torch
+
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                logger.info(f"Loading reranker model: {self.settings.reranker_model} on {device}")
+                self.reranker = CrossEncoder(self.settings.reranker_model, device=device)
+                logger.info("Reranker loaded successfully on %s", device)
             except Exception as e:
                 logger.warning(f"Failed to load reranker, continuing without reranking: {e}")
                 self.reranker = None

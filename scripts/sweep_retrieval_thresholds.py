@@ -303,7 +303,10 @@ def _process_single_question(
     candidates: list[dict] = []
     if docs:
         pairs = [[query, chain._build_reranker_document_text(doc)] for doc in docs]
-        raw_scores = chain.reranker.predict(pairs) if chain.reranker else [1.0] * len(docs)
+        if chain.reranker:
+            raw_scores = chain.reranker.predict(pairs, batch_size=32)
+        else:
+            raw_scores = [1.0] * len(docs)
         normalized = normalize_sigmoid_scores(raw_scores)
         for doc, score in zip(docs, normalized):
             metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
