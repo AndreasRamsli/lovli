@@ -227,20 +227,36 @@ class Settings(BaseSettings):
         description="Maximum number of candidate laws to route to before retrieval.",
     )
     law_routing_prefilter_k: int = Field(
-        default=80,
+        default=160,
         ge=3,
-        le=200,
+        le=500,
         description=(
             "When embedding routing is enabled: number of top laws returned from the full-catalog "
             "ANN pass before confidence filtering. When embedding is disabled: maximum number of "
-            "lexical candidates passed to the cross-encoder reranker."
+            "lexical candidates passed to the cross-encoder reranker. "
+            "Raised from 80 to 160: BGE-M3 cosine scores are tightly clustered (~0.43-0.60) so "
+            "the correct law can rank 80-120 for queries using inflected/topic-specific terms not "
+            "present verbatim in catalog summaries."
         ),
     )
     law_routing_rerank_top_k: int = Field(
-        default=6,
+        default=10,
         ge=1,
-        le=20,
-        description="Number of top laws to keep after law-level reranker scoring.",
+        le=40,
+        description="Maximum number of top laws to keep after law-level reranker scoring.",
+    )
+    law_routing_score_window: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "In the filtered (non-uncertain) routing path, keep all candidates whose score is "
+            "within this gap of the top score, up to law_routing_rerank_top_k. "
+            "Prevents a hard rank cutoff from dropping the correct law when scores are "
+            "tightly clustered (typical for BGE-M3 cosine similarity, which compresses into "
+            "0.45-0.60 for most Norwegian legal text pairs). Set to 0.0 to use a strict "
+            "top-k cutoff."
+        ),
     )
     law_routing_summary_dualpass_enabled: bool = Field(
         default=False,

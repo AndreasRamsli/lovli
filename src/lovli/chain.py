@@ -866,6 +866,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
 
         min_confidence = self.settings.law_routing_min_confidence
         rerank_top_k = self.settings.law_routing_rerank_top_k
+        score_window = float(getattr(self.settings, "law_routing_score_window", 0.15))
         lexical_top_k = self.settings.law_routing_max_candidates
         fallback_max_laws = self.settings.law_routing_fallback_max_laws
         fallback_min_lexical = self.settings.law_routing_fallback_min_lexical_support
@@ -987,7 +988,27 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
                     "candidate_excluded": excluded,
                 }
             else:
-                routed = [candidate["law_id"] for candidate in selected[:rerank_top_k]]
+                # Score-gap window: keep candidates within score_window of the top score,
+                # capped at rerank_top_k. Prevents a hard rank cutoff from dropping the
+                # correct law when embedding scores are tightly clustered (~0.45-0.60).
+                if score_window > 0.0 and selected:
+                    top_sel_score = selected[0].get("law_reranker_score")
+                    if isinstance(top_sel_score, float):
+                        window_floor = top_sel_score - score_window
+                        windowed = [
+                            c
+                            for c in selected
+                            if c.get("direct_mention")
+                            or (
+                                isinstance(c.get("law_reranker_score"), float)
+                                and c["law_reranker_score"] >= window_floor
+                            )
+                        ]
+                        routed = [c["law_id"] for c in windowed[:rerank_top_k]]
+                    else:
+                        routed = [c["law_id"] for c in selected[:rerank_top_k]]
+                else:
+                    routed = [candidate["law_id"] for candidate in selected[:rerank_top_k]]
         else:
             routed = [candidate["law_id"] for candidate in scored_candidates[:lexical_top_k]]
         routed = [law_id for law_id in routed if (law_id or "").strip()]

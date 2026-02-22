@@ -149,6 +149,8 @@ def _precompute_cache_key(
     law_routing_embedding_enabled: bool = False,
     law_routing_embedding_weight: float = 0.7,
     law_routing_embedding_text_field: str = "routing_summary_text",
+    law_routing_prefilter_k: int = 160,
+    law_routing_score_window: float = 0.15,
 ) -> str:
     """Deterministic cache key for precomputed candidates. Invalidation on any input change.
 
@@ -160,7 +162,8 @@ def _precompute_cache_key(
         f"{fallback_unfiltered}|{reranker_ctx_enabled}|{dualpass_enabled}|"
         f"{reranker_model}|{law_routing_reranker_enabled}|"
         f"{law_routing_embedding_enabled}|{law_routing_embedding_weight}|"
-        f"{law_routing_embedding_text_field}"
+        f"{law_routing_embedding_text_field}|"
+        f"{law_routing_prefilter_k}|{law_routing_score_window}"
     )
     return hashlib.sha256(blob.encode()).hexdigest()[:24]
 
@@ -1269,6 +1272,8 @@ def main() -> None:
             law_routing_embedding_text_field=str(
                 getattr(settings, "law_routing_embedding_text_field", "routing_summary_text")
             ),
+            law_routing_prefilter_k=int(getattr(settings, "law_routing_prefilter_k", 160)),
+            law_routing_score_window=float(getattr(settings, "law_routing_score_window", 0.15)),
         )
         cache_path = None
         if cache_dir:
