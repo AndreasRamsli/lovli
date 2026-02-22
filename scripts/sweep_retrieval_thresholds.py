@@ -148,21 +148,53 @@ def _precompute_cache_key(
     law_routing_reranker_enabled: bool = False,
     law_routing_embedding_enabled: bool = False,
     law_routing_embedding_weight: float = 0.7,
+    law_routing_embedding_text_field: str = "routing_summary_text",
 ) -> str:
     """Deterministic cache key for precomputed candidates. Invalidation on any input change.
 
-    Includes reranker_model, law_routing_reranker_enabled, and
-    law_routing_embedding_enabled/weight so that changes to the routing config
-    (e.g. switching from lexical-only to embedding hybrid) bust the cache and
-    prevent stale scores from being reused across runs.
+    Includes all routing config dimensions so that any routing change busts the
+    cache and prevents stale scores from being reused across runs.
     """
     blob = (
         f"{questions_sha256}|{git_commit}|{qdrant_collection}|{max_k_initial}|"
         f"{fallback_unfiltered}|{reranker_ctx_enabled}|{dualpass_enabled}|"
         f"{reranker_model}|{law_routing_reranker_enabled}|"
-        f"{law_routing_embedding_enabled}|{law_routing_embedding_weight}"
+        f"{law_routing_embedding_enabled}|{law_routing_embedding_weight}|"
+        f"{law_routing_embedding_text_field}"
     )
     return hashlib.sha256(blob.encode()).hexdigest()[:24]
+
+
+def _cache_routing_mode_matches(
+    candidates: list[dict],
+    embedding_enabled: bool,
+    reranker_enabled: bool,
+) -> bool:
+    """Validate that a loaded cache's routing mode matches the current config.
+
+    Guards against a scenario where embedding/reranker was enabled but the cache
+    was written by a run where the routing silently fell back to lexical-only
+    (e.g. embedding index build failed). In that case the cached law_reranker_score
+    values are all null, making the cache useless even though the key matches.
+    """
+    if not candidates:
+        return True
+    if not embedding_enabled and not reranker_enabled:
+        return True  # Lexical-only expected — any cache is valid
+    # Expect at least some candidates to have a non-null law_reranker_score
+    scored = [
+        c
+        for row in candidates
+        for c in row.get("routing_diagnostics", {}).get("scored_candidates", [])
+        if c.get("law_reranker_score") is not None
+    ]
+    if scored:
+        return True
+    logger.warning(
+        "Cache routing mode mismatch: embedding/reranker enabled but cached candidates "
+        "all have law_reranker_score=null (lexical-only fallback). Discarding cache."
+    )
+    return False
 
 
 def classify_case_type(row: dict) -> str:
@@ -1196,6 +1228,15 @@ def main() -> None:
     max_k_initial = max(retrieval_k_initial_values)
     cache_dir_raw = os.getenv("SWEEP_CACHE_DIR")
     cache_dir = Path(cache_dir_raw) if cache_dir_raw and cache_dir_raw.strip() else None
+    # SWEEP_CLEAR_CACHE=1 forces deletion of all precompute cache files at startup.
+    # Use this in the Colab preflight cell instead of (or in addition to) manual deletion,
+    # so that stale caches from prior sessions are always evicted before a fresh run.
+    if cache_dir and _env_flag("SWEEP_CLEAR_CACHE", default=False):
+        cleared = 0
+        for stale in cache_dir.glob("sweep_precompute_*.json"):
+            stale.unlink(missing_ok=True)
+            cleared += 1
+        logger.info("SWEEP_CLEAR_CACHE: cleared %d cache file(s) from %s", cleared, cache_dir)
     cached_candidates_by_mode: dict[tuple[bool, bool, bool], list[dict]] = {}
     qdrant_collection = settings.qdrant_collection_name
     for fallback_unfiltered, reranker_ctx_enabled, dualpass_enabled in itertools.product(
@@ -1225,12 +1266,17 @@ def main() -> None:
             law_routing_embedding_weight=float(
                 getattr(settings, "law_routing_embedding_weight", 0.7)
             ),
+            law_routing_embedding_text_field=str(
+                getattr(settings, "law_routing_embedding_text_field", "routing_summary_text")
+            ),
         )
         cache_path = None
         if cache_dir:
             cache_dir.mkdir(parents=True, exist_ok=True)
             cache_path = cache_dir / f"sweep_precompute_{key_hash}.json"
         loaded = False
+        embedding_enabled = bool(getattr(settings, "law_routing_embedding_enabled", False))
+        reranker_enabled = bool(getattr(settings, "law_routing_reranker_enabled", False))
         if cache_path and cache_path.exists():
             try:
                 with open(cache_path, "r", encoding="utf-8") as f:
@@ -1240,6 +1286,11 @@ def main() -> None:
                     and data.get("git_commit") == git_commit
                     and data.get("qdrant_collection") == qdrant_collection
                     and data.get("max_k_initial") == max_k_initial
+                    and _cache_routing_mode_matches(
+                        data.get("candidates", []),
+                        embedding_enabled=embedding_enabled,
+                        reranker_enabled=reranker_enabled,
+                    )
                 ):
                     cached_candidates_by_mode[cache_key_tuple] = data["candidates"]
                     loaded = True
@@ -1250,6 +1301,13 @@ def main() -> None:
                         reranker_ctx_enabled,
                         dualpass_enabled,
                     )
+                else:
+                    logger.warning(
+                        "Discarding precompute cache %s: content validation failed. "
+                        "Will recompute from scratch.",
+                        key_hash[:12],
+                    )
+                    cache_path.unlink(missing_ok=True)
             except Exception as e:
                 logger.warning("Cache load failed for %s: %s", cache_path, e)
         if not loaded:
