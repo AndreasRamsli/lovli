@@ -472,6 +472,83 @@ def score_law_candidates_embedding(
     return scored
 
 
+def score_all_laws_embedding(
+    query_embedding: list[float],
+    catalog_entries: list[dict[str, Any]],
+    *,
+    top_k: int = 80,
+    direct_mention_bonus: float = 0.15,
+    query_norm: str = "",
+) -> list[dict[str, Any]]:
+    """Score ALL catalog entries by embedding cosine similarity and return top-k.
+
+    Replaces the lexical prefilter → embedding reranker two-stage pipeline.
+    By scoring all laws directly we eliminate the lexical token-overlap gate,
+    which was discarding the expected law (e.g. husleieloven) for queries that
+    use inflected forms not present in the catalog token set.
+
+    A small ``direct_mention_bonus`` is added for laws whose short name or title
+    appears verbatim in the query, preserving the benefit of the lexical direct-
+    mention detection without gating on token overlap.
+
+    Args:
+        query_embedding: Dense float vector for the query (pre-computed by caller).
+        catalog_entries: All catalog entries with ``embedding`` keys attached
+            (output of ``build_law_embedding_index``).
+        top_k: Number of top candidates to return.
+        direct_mention_bonus: Score bonus for direct law name/short-name mention.
+        query_norm: Normalised query string for direct-mention detection
+            (``normalize_law_mention(query)``). Pass empty string to skip.
+
+    Returns:
+        List of up to ``top_k`` candidate dicts sorted descending by
+        ``law_reranker_score``, with ``law_embedding_sim`` and ``lexical_score``
+        fields included for downstream compatibility.
+    """
+    if not catalog_entries or not query_embedding:
+        return []
+
+    scored: list[dict[str, Any]] = []
+    for entry in catalog_entries:
+        emb = entry.get("embedding")
+        if emb is None:
+            continue
+        try:
+            sim = _cosine_similarity(query_embedding, emb)
+            sim = max(0.0, min(1.0, sim))
+        except Exception:
+            sim = 0.0
+
+        # Direct-mention bonus — preserves lexical direct-mention signal without
+        # requiring full token overlap.
+        bonus = 0.0
+        if query_norm:
+            short_name = entry.get("short_name_normalized") or ""
+            law_title = entry.get("law_title_normalized") or ""
+            if (short_name and short_name in query_norm) or (law_title and law_title in query_norm):
+                bonus = direct_mention_bonus
+
+        score = min(1.0, sim + bonus)
+        scored.append(
+            {
+                "law_id": entry.get("law_id", ""),
+                "law_title": entry.get("law_title", ""),
+                "law_short_name": entry.get("law_short_name", ""),
+                "routing_text": entry.get("routing_text", ""),
+                "routing_title_text": entry.get("routing_title_text", ""),
+                "routing_summary_text": entry.get("routing_summary_text", ""),
+                "embedding": emb,
+                "lexical_score": 0,  # No lexical gate — downstream compat
+                "direct_mention": bonus > 0,
+                "law_embedding_sim": sim,
+                "law_reranker_score": score,
+            }
+        )
+
+    scored.sort(key=lambda c: c["law_reranker_score"], reverse=True)
+    return scored[:top_k]
+
+
 # ---------------------------------------------------------------------------
 # Main routing decision
 # ---------------------------------------------------------------------------

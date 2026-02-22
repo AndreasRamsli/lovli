@@ -31,6 +31,7 @@ from .routing import (
     build_law_embedding_index,
     build_routing_entries,
     score_law_candidates_embedding,
+    score_all_laws_embedding,
     score_law_candidates_lexical,
     score_law_candidates_reranker,
     compute_routing_alignment,
@@ -816,16 +817,69 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
                 "routed_law_ids": [],
             }
             return []
-        lexical_candidates = self._score_law_candidates_lexical(query)
-        if not lexical_candidates:
-            self._last_routing_diagnostics = {
-                "enabled": True,
-                "reason": "no_lexical_candidates",
-                "routed_law_ids": [],
-            }
-            return []
+        lexical_candidates: list[dict[str, Any]] = []
+        # When embedding routing is enabled, bypass the lexical token-overlap
+        # prefilter and score ALL catalog entries directly by cosine similarity.
+        # The lexical prefilter drops laws whose catalog text doesn't share exact
+        # tokens with the query (e.g. husleieloven is absent for "depositum" or
+        # "husleien" queries because the catalog uses uninflected forms).
+        # Scoring all 4427 laws is fast on GPU (~2-4ms for a single matmul).
+        if self.settings.law_routing_embedding_enabled and self._law_catalog_entries:
+            has_embeddings = any(
+                c.get("embedding") is not None for c in self._law_catalog_entries[:5]
+            )
+            if has_embeddings:
+                try:
+                    query_embedding = self.embeddings.embed_query(query)
+                    query_norm = _normalize_law_mention(query)
+                    scored_candidates = score_all_laws_embedding(
+                        query_embedding,
+                        self._law_catalog_entries,
+                        top_k=self.settings.law_routing_prefilter_k,
+                        query_norm=query_norm,
+                    )
+                    if not scored_candidates:
+                        self._last_routing_diagnostics = {
+                            "enabled": True,
+                            "reason": "no_embedding_candidates",
+                            "routed_law_ids": [],
+                        }
+                        return []
+                except Exception as exc:
+                    logger.warning(
+                        "Embedding law routing failed (%s); falling back to lexical.", exc
+                    )
+                    scored_candidates = None
+            else:
+                logger.warning(
+                    "Embedding routing enabled but no embeddings found in catalog entries. "
+                    "Was build_law_embedding_index called? Falling back to lexical."
+                )
+                scored_candidates = None
 
-        scored_candidates = self._score_law_candidates_reranker(query, lexical_candidates)
+            if scored_candidates is not None:
+                # Skip the rest of the lexical path
+                pass
+            else:
+                lexical_candidates = self._score_law_candidates_lexical(query)
+                if not lexical_candidates:
+                    self._last_routing_diagnostics = {
+                        "enabled": True,
+                        "reason": "no_lexical_candidates",
+                        "routed_law_ids": [],
+                    }
+                    return []
+                scored_candidates = self._score_law_candidates_reranker(query, lexical_candidates)
+        else:
+            lexical_candidates = self._score_law_candidates_lexical(query)
+            if not lexical_candidates:
+                self._last_routing_diagnostics = {
+                    "enabled": True,
+                    "reason": "no_lexical_candidates",
+                    "routed_law_ids": [],
+                }
+                return []
+            scored_candidates = self._score_law_candidates_reranker(query, lexical_candidates)
 
         min_confidence = self.settings.law_routing_min_confidence
         rerank_top_k = self.settings.law_routing_rerank_top_k
