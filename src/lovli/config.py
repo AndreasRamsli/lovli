@@ -230,7 +230,11 @@ class Settings(BaseSettings):
         default=80,
         ge=3,
         le=200,
-        description="Maximum lexical routing candidates to score in the hybrid law routing prefilter.",
+        description=(
+            "When embedding routing is enabled: number of top laws returned from the full-catalog "
+            "ANN pass before confidence filtering. When embedding is disabled: maximum number of "
+            "lexical candidates passed to the cross-encoder reranker."
+        ),
     )
     law_routing_rerank_top_k: int = Field(
         default=6,

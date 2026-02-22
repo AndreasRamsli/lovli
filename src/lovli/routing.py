@@ -9,7 +9,18 @@ from __future__ import annotations
 import logging
 import math
 import re
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:
+    import numpy as np  # pragma: no cover
+
+try:
+    import numpy as _np_module  # type: ignore[import-untyped]
+
+    _NUMPY_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _np_module = None  # type: ignore[assignment]
+    _NUMPY_AVAILABLE = False
 
 from .scoring import normalize_sigmoid_scores
 
@@ -400,78 +411,6 @@ def build_law_embedding_index(
     return indexed
 
 
-def score_law_candidates_embedding(
-    query_embedding: list[float],
-    candidates: list[dict[str, Any]],
-    *,
-    embedding_weight: float = 0.7,
-    max_lexical_score: float = 10.0,
-) -> list[dict[str, Any]]:
-    """Score law candidates using embedding cosine similarity blended with lexical overlap.
-
-    Pure function — takes a pre-computed query embedding so the embed call
-    happens once outside and can be mocked in tests.
-
-    Scoring formula::
-
-        norm_lexical  = min(lexical_score, max_lexical_score) / max_lexical_score
-        hybrid_score  = embedding_sim * w + norm_lexical * (1 - w)
-
-    The result is stored in ``law_reranker_score`` so the rest of the routing
-    pipeline (confidence thresholds, uncertainty detection, alignment map) is
-    unchanged.
-
-    Args:
-        query_embedding: Dense float vector for the query.
-        candidates: Lexical candidates (must have ``embedding`` key from
-            ``build_law_embedding_index``).
-        embedding_weight: Blend weight for embedding similarity [0, 1].
-        max_lexical_score: Normalisation ceiling for lexical overlap scores.
-
-    Returns:
-        Candidates sorted descending by ``law_reranker_score``.
-    """
-    if not candidates:
-        return candidates
-
-    lexical_w = max(0.0, min(1.0, 1.0 - embedding_weight))
-    embed_w = max(0.0, min(1.0, float(embedding_weight)))
-
-    scored: list[dict[str, Any]] = []
-    for candidate in candidates:
-        emb = candidate.get("embedding")
-        if emb is None:
-            # Fallback: lexical only
-            lex = float(candidate.get("lexical_score", 0))
-            hybrid = min(1.0, lex / max(max_lexical_score, 1.0))
-        else:
-            try:
-                sim = _cosine_similarity(query_embedding, emb)
-                # Clamp to [0, 1] — cosine can be negative for unrelated texts
-                sim = max(0.0, min(1.0, sim))
-            except Exception:
-                sim = 0.0
-            lex = float(candidate.get("lexical_score", 0))
-            norm_lex = min(1.0, lex / max(max_lexical_score, 1.0))
-            hybrid = embed_w * sim + lexical_w * norm_lex
-
-        item = dict(candidate)
-        item["law_embedding_sim"] = float(
-            _cosine_similarity(query_embedding, emb) if emb is not None else 0.0
-        )
-        item["law_reranker_score"] = hybrid
-        scored.append(item)
-
-    scored.sort(
-        key=lambda c: (
-            c.get("law_reranker_score", 0.0),
-            c.get("lexical_score", 0),
-        ),
-        reverse=True,
-    )
-    return scored
-
-
 def score_all_laws_embedding(
     query_embedding: list[float],
     catalog_entries: list[dict[str, Any]],
@@ -484,19 +423,24 @@ def score_all_laws_embedding(
 
     Replaces the lexical prefilter → embedding reranker two-stage pipeline.
     By scoring all laws directly we eliminate the lexical token-overlap gate,
-    which was discarding the expected law (e.g. husleieloven) for queries that
-    use inflected forms not present in the catalog token set.
+    which discards laws whose catalog text doesn't share exact uninflected tokens
+    with the query (common in morphologically rich languages like Norwegian).
 
-    A small ``direct_mention_bonus`` is added for laws whose short name or title
-    appears verbatim in the query, preserving the benefit of the lexical direct-
-    mention detection without gating on token overlap.
+    Uses numpy for a vectorised matrix multiply when available (~10-50x faster
+    than the pure-Python cosine loop for 4427 × 1024-dim vectors).
+
+    A configurable ``direct_mention_bonus`` is added for laws whose normalised
+    short name or title appears verbatim in the query, preserving the benefit of
+    exact law name detection without gating on token overlap.
 
     Args:
         query_embedding: Dense float vector for the query (pre-computed by caller).
         catalog_entries: All catalog entries with ``embedding`` keys attached
             (output of ``build_law_embedding_index``).
         top_k: Number of top candidates to return.
-        direct_mention_bonus: Score bonus for direct law name/short-name mention.
+        direct_mention_bonus: Score bonus added when the law's normalised short
+            name or title appears verbatim in the query. Applied before clamping
+            to [0, 1]. Set to 0.0 to disable.
         query_norm: Normalised query string for direct-mention detection
             (``normalize_law_mention(query)``). Pass empty string to skip.
 
@@ -508,21 +452,48 @@ def score_all_laws_embedding(
     if not catalog_entries or not query_embedding:
         return []
 
-    scored: list[dict[str, Any]] = []
-    for entry in catalog_entries:
-        emb = entry.get("embedding")
-        if emb is None:
-            continue
-        try:
-            sim = _cosine_similarity(query_embedding, emb)
-            sim = max(0.0, min(1.0, sim))
-        except Exception:
-            sim = 0.0
+    # Separate entries with embeddings from those without
+    valid_entries = [e for e in catalog_entries if e.get("embedding") is not None]
+    if not valid_entries:
+        return []
 
-        # Direct-mention bonus — preserves lexical direct-mention signal without
-        # requiring full token overlap.
+    if _NUMPY_AVAILABLE:
+        # Vectorised path: one matrix multiply for all similarities
+        assert _np_module is not None  # _NUMPY_AVAILABLE guarantees successful import
+        _np = _np_module
+        q = _np.array(query_embedding, dtype=_np.float32)
+        q_norm = _np.linalg.norm(q)
+        if q_norm == 0.0:
+            return []
+        q_unit = q / q_norm
+
+        # Stack catalog embeddings into (n_laws, dim) matrix
+        mat = _np.array([e["embedding"] for e in valid_entries], dtype=_np.float32)
+        norms = _np.linalg.norm(mat, axis=1, keepdims=True)
+        # Avoid division by zero for zero-norm rows
+        norms = _np.where(norms == 0.0, 1.0, norms)
+        mat_unit = mat / norms
+        sims = mat_unit @ q_unit  # (n_laws,)
+        sims = _np.clip(sims, 0.0, 1.0)
+        sim_list: list[float] = sims.tolist()
+    else:
+        # Pure-Python fallback — correct but slower for large catalogs
+        q_norm = math.sqrt(sum(x * x for x in query_embedding))
+        if q_norm == 0.0:
+            return []
+        sim_list = []
+        for entry in valid_entries:
+            emb = entry["embedding"]
+            try:
+                sim_list.append(max(0.0, min(1.0, _cosine_similarity(query_embedding, emb))))
+            except Exception:
+                sim_list.append(0.0)
+
+    # Build result list with direct-mention bonus
+    scored: list[dict[str, Any]] = []
+    for entry, sim in zip(valid_entries, sim_list):
         bonus = 0.0
-        if query_norm:
+        if query_norm and direct_mention_bonus > 0.0:
             short_name = entry.get("short_name_normalized") or ""
             law_title = entry.get("law_title_normalized") or ""
             if (short_name and short_name in query_norm) or (law_title and law_title in query_norm):
@@ -537,10 +508,12 @@ def score_all_laws_embedding(
                 "routing_text": entry.get("routing_text", ""),
                 "routing_title_text": entry.get("routing_title_text", ""),
                 "routing_summary_text": entry.get("routing_summary_text", ""),
-                "embedding": emb,
-                "lexical_score": 0,  # No lexical gate — downstream compat
-                "direct_mention": bonus > 0,
-                "law_embedding_sim": sim,
+                "embedding": entry["embedding"],
+                # lexical_score=0: no lexical gate in ANN path; kept for
+                # downstream field compatibility (uncertainty fallback, diagnostics).
+                "lexical_score": 0,
+                "direct_mention": bonus > 0.0,
+                "law_embedding_sim": float(sim),
                 "law_reranker_score": score,
             }
         )

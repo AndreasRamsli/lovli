@@ -30,7 +30,6 @@ from .scoring import (
 from .routing import (
     build_law_embedding_index,
     build_routing_entries,
-    score_law_candidates_embedding,
     score_all_laws_embedding,
     score_law_candidates_lexical,
     score_law_candidates_reranker,
@@ -332,27 +331,11 @@ Kontekst fra lovtekster:
         3. Lexical only (both disabled): all ``law_reranker_score`` set to None,
            routing falls through to token-overlap top-k selection.
         """
-        # --- Embedding hybrid path (preferred) ---
-        if self.settings.law_routing_embedding_enabled:
-            # Check that at least one candidate has an embedding (index was built)
-            has_embeddings = any(c.get("embedding") is not None for c in candidates[:5])
-            if has_embeddings:
-                try:
-                    query_embedding = self.embeddings.embed_query(query)
-                    return score_law_candidates_embedding(
-                        query_embedding,
-                        candidates,
-                        embedding_weight=float(self.settings.law_routing_embedding_weight),
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Embedding law routing failed (%s); falling back to lexical.", exc
-                    )
-            else:
-                logger.warning(
-                    "Embedding routing enabled but no embeddings found in catalog entries. "
-                    "Was build_law_embedding_index called? Falling back to lexical."
-                )
+        # --- Embedding hybrid path ---
+        # NOTE: when law_routing_embedding_enabled is True, _route_law_ids bypasses
+        # this method entirely and calls score_all_laws_embedding() directly (ANN pass
+        # over all laws, no lexical prefilter). This block is only reached when embedding
+        # is enabled but _route_law_ids fell back to the lexical path due to an error.
 
         # --- Cross-encoder path (opt-in, rarely useful for catalog texts) ---
         if self.settings.law_routing_reranker_enabled:
@@ -898,8 +881,10 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
                 if len(scored_candidates) > 1
                 else None
             )
-            if top_score is not None and second_score is not None:
-                score_gap = top_score - second_score
+            if top_score is not None:
+                if second_score is not None:
+                    score_gap = top_score - second_score
+                # Determine score_mode independently of whether second_score exists
                 if self.settings.law_routing_embedding_enabled and any(
                     c.get("embedding") is not None for c in scored_candidates[:5]
                 ):
@@ -951,23 +936,45 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
                 broadened: list[dict[str, Any]] = []
                 excluded = 0
                 relaxed_rerank_floor = max(0.0, float(min_confidence) * 0.80)
+                # In the ANN path all candidates have lexical_score=0 (no lexical
+                # gate was applied), so gating on lexical_score would reject every
+                # candidate. Use rerank_score alone when no lexical signal exists.
+                ann_path = self.settings.law_routing_embedding_enabled and all(
+                    int(c.get("lexical_score", 0)) == 0 for c in scored_candidates[:5]
+                )
                 for candidate in scored_candidates:
-                    lexical_ok = int(candidate.get("lexical_score", 0)) >= fallback_min_lexical
                     rerank_score = candidate.get("law_reranker_score")
                     rerank_ok = (
                         rerank_score is not None and float(rerank_score) >= relaxed_rerank_floor
                     )
                     direct_mention = bool(candidate.get("direct_mention"))
-                    if lexical_ok and (direct_mention or rerank_ok):
-                        broadened.append(candidate)
+                    if ann_path:
+                        # ANN path: admit by score or direct mention alone
+                        if direct_mention or rerank_ok:
+                            broadened.append(candidate)
+                        else:
+                            excluded += 1
                     else:
-                        excluded += 1
+                        lexical_ok = int(candidate.get("lexical_score", 0)) >= fallback_min_lexical
+                        if lexical_ok and (direct_mention or rerank_ok):
+                            broadened.append(candidate)
+                        else:
+                            excluded += 1
                 if not broadened:
-                    broadened = [
-                        candidate
-                        for candidate in scored_candidates
-                        if int(candidate.get("lexical_score", 0)) >= fallback_min_lexical
-                    ]
+                    if ann_path:
+                        # Widen to everything above a minimal embedding similarity
+                        broadened = [
+                            c
+                            for c in scored_candidates
+                            if (c.get("law_reranker_score") or 0.0)
+                            >= max(0.0, relaxed_rerank_floor * 0.5)
+                        ]
+                    else:
+                        broadened = [
+                            candidate
+                            for candidate in scored_candidates
+                            if int(candidate.get("lexical_score", 0)) >= fallback_min_lexical
+                        ]
                 if not broadened:
                     broadened = list(scored_candidates)
                 routed = [candidate["law_id"] for candidate in broadened[:fallback_max_laws]]
