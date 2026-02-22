@@ -190,6 +190,11 @@ def score_law_candidates_lexical(
                 "routing_summary_text": entry.get("routing_summary_text", ""),
                 "lexical_score": overlap,
                 "direct_mention": direct_mention,
+                # Preserve the pre-built embedding vector so the embedding hybrid
+                # routing path can compute cosine similarity without re-embedding.
+                # Without this, has_embeddings check in _score_law_candidates_reranker
+                # always returns False and routing silently falls back to lexical-only.
+                "embedding": entry.get("embedding"),
             }
         )
 
