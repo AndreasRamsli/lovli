@@ -351,7 +351,12 @@ def _process_single_question(
     if docs:
         pairs = [[query, chain._build_reranker_document_text(doc)] for doc in docs]
         if chain.reranker:
-            raw_scores = chain.reranker.predict(pairs, batch_size=32)
+            # Use a large batch size so the GPU (H100/T4) processes all pairs in
+            # one or two kernel launches rather than many small ones. With 22 docs
+            # per query this is a single batch; on full_validation (k_initial=50)
+            # it stays within one batch. batch_size=256 safely exceeds any realistic
+            # k_initial and avoids the overhead of small fragmented GPU dispatches.
+            raw_scores = chain.reranker.predict(pairs, batch_size=256)
         else:
             raw_scores = [1.0] * len(docs)
         normalized = normalize_sigmoid_scores(raw_scores)
@@ -399,10 +404,13 @@ def precompute_candidates(
     """Run retrieval/reranker once per question and cache candidates for offline sweeping.
 
     Args:
-        chain: LegalRAGChain instance
+        chain: LegalRAGChain instance (main chain; shared across serial/parallel calls)
         questions: List of question dicts
         max_k_initial: Maximum initial retrieval k
-        parallel: If True, use parallel processing (requires fresh chain per thread)
+        parallel: If True, use parallel Qdrant retrieval via ThreadPoolExecutor.
+            Workers share the main chain's reranker and embedding index — no fresh
+            LegalRAGChain construction per thread, which avoids re-embedding 4427
+            laws on every worker (BGE-M3 full-catalog embed takes ~4s on H100).
         max_workers: Number of parallel workers (default 4)
     """
     chain.retriever = chain.vectorstore.as_retriever(search_kwargs={"k": max_k_initial})
@@ -411,12 +419,14 @@ def precompute_candidates(
         logger.info("Using parallel precomputation with %d workers", max_workers)
         cached: list[dict | None] = [None] * len(questions)
 
+        # Share the main chain across all threads. Qdrant client and HuggingFace
+        # embeddings are thread-safe for read operations. The reranker (CrossEncoder)
+        # is also safe to call concurrently — PyTorch GPU ops serialize internally.
+        # We do NOT create new LegalRAGChain instances per thread; doing so would
+        # re-run build_law_embedding_index (embed_documents over all 4427 laws) on
+        # every worker, wasting ~4s × workers of H100 time and fragmenting GPU memory.
         def process_with_chain(idx: int, row: dict) -> tuple[int, dict]:
-            new_chain = LegalRAGChain(settings=chain.settings)
-            new_chain.retriever = new_chain.vectorstore.as_retriever(
-                search_kwargs={"k": max_k_initial}
-            )
-            result = _process_single_question(new_chain, row, max_k_initial)
+            result = _process_single_question(chain, row, max_k_initial)
             return idx, result
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
