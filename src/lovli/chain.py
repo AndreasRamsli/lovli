@@ -846,14 +846,23 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             )
             if top_score is not None and second_score is not None:
                 score_gap = top_score - second_score
-                score_mode = (
-                    "reranker_dualpass"
-                    if self.settings.law_routing_summary_dualpass_enabled
-                    else "reranker"
-                )
+                if self.settings.law_routing_embedding_enabled and any(
+                    c.get("embedding") is not None for c in scored_candidates[:5]
+                ):
+                    score_mode = "embedding_hybrid"
+                elif self.settings.law_routing_summary_dualpass_enabled:
+                    score_mode = "reranker_dualpass"
+                else:
+                    score_mode = "reranker"
 
         def _is_uncertain(candidates: list[dict[str, Any]]) -> bool:
-            if not candidates or not self.reranker:
+            if not candidates:
+                return False
+            # Uncertainty detection applies to any scored path (embedding or reranker),
+            # not just the cross-encoder. Previously gated on self.reranker which silently
+            # disabled uncertainty handling for the embedding hybrid path.
+            has_scores = any(c.get("law_reranker_score") is not None for c in candidates)
+            if not has_scores:
                 return False
             top = candidates[0]
             top_score = top.get("law_reranker_score")
