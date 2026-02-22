@@ -146,17 +146,21 @@ def _precompute_cache_key(
     dualpass_enabled: bool,
     reranker_model: str = "",
     law_routing_reranker_enabled: bool = False,
+    law_routing_embedding_enabled: bool = False,
+    law_routing_embedding_weight: float = 0.7,
 ) -> str:
     """Deterministic cache key for precomputed candidates. Invalidation on any input change.
 
-    Includes reranker_model and law_routing_reranker_enabled so that changes to
-    the reranker config (e.g. disabling law-routing reranker) bust the cache and
-    prevent stale fp16-collapsed scores from being reused across runs.
+    Includes reranker_model, law_routing_reranker_enabled, and
+    law_routing_embedding_enabled/weight so that changes to the routing config
+    (e.g. switching from lexical-only to embedding hybrid) bust the cache and
+    prevent stale scores from being reused across runs.
     """
     blob = (
         f"{questions_sha256}|{git_commit}|{qdrant_collection}|{max_k_initial}|"
         f"{fallback_unfiltered}|{reranker_ctx_enabled}|{dualpass_enabled}|"
-        f"{reranker_model}|{law_routing_reranker_enabled}"
+        f"{reranker_model}|{law_routing_reranker_enabled}|"
+        f"{law_routing_embedding_enabled}|{law_routing_embedding_weight}"
     )
     return hashlib.sha256(blob.encode()).hexdigest()[:24]
 
@@ -1214,6 +1218,12 @@ def main() -> None:
             reranker_model=settings.reranker_model,
             law_routing_reranker_enabled=bool(
                 getattr(settings, "law_routing_reranker_enabled", False)
+            ),
+            law_routing_embedding_enabled=bool(
+                getattr(settings, "law_routing_embedding_enabled", False)
+            ),
+            law_routing_embedding_weight=float(
+                getattr(settings, "law_routing_embedding_weight", 0.7)
             ),
         )
         cache_path = None
