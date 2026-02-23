@@ -52,6 +52,9 @@ TRUST_PROFILES: dict[str, dict[str, Any]] = {
         "law_routing_stage1_min_docs": 3,
         "law_routing_stage1_min_top_score": 0.38,
         "law_routing_summary_dualpass_enabled": True,
+        # Raised from 0.15 → 0.20 to ensure explicitly-named laws rank first
+        # even when their embedding sim is marginal (common for husleieloven queries).
+        "law_routing_direct_mention_bonus": 0.20,
         "law_coherence_dominant_concentration_threshold": 0.60,
         "law_rank_fusion_enabled": True,
         "law_rank_fusion_weight_doc_score": 0.63,

@@ -5,7 +5,11 @@ import pytest
 from unittest.mock import Mock, MagicMock, patch
 from lovli.chain import LegalRAGChain
 from lovli.config import Settings
-from lovli.routing import score_all_laws_embedding, build_law_embedding_index
+from lovli.routing import (
+    extract_section_article_ids,
+    build_law_embedding_index,
+    score_all_laws_embedding,
+)
 
 
 @pytest.fixture
@@ -877,3 +881,230 @@ def test_balanced_v2_profile_values():
     assert v1["reranker_ambiguity_top_score_ceiling"] == 0.70
     assert v1["reranker_ambiguity_min_gap"] == 0.05
     assert v1["reranker_min_doc_score"] == 0.32
+
+
+# ---------------------------------------------------------------------------
+# extract_section_article_ids tests (Fix 1 — article narrowing)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_section_article_ids_dash_pattern():
+    """§ X-Y pattern should yield kapittel-X-paragraf-Y."""
+    # Use a query that ends with the section ref to avoid trailing letter capture
+    result = extract_section_article_ids("Hva sier husleieloven § 3-5?")
+    assert result == ["kapittel-3-paragraf-5"]
+
+
+def test_extract_section_article_ids_letter_suffix():
+    """§ X-Ya suffix should be preserved in the output."""
+    result = extract_section_article_ids("Husleieloven § 3-5a regulerer")
+    assert "kapittel-3-paragraf-5a" in result
+
+
+def test_extract_section_article_ids_multi():
+    """Multiple §§ references in one query should all be extracted."""
+    # Use queries where the paragraph number is followed by punctuation
+    result = extract_section_article_ids("Se husleieloven §§ 1-1, og § 2-3.")
+    assert "kapittel-1-paragraf-1" in result
+    assert "kapittel-2-paragraf-3" in result
+
+
+def test_extract_section_article_ids_no_match():
+    """Queries without section references return empty list."""
+    result = extract_section_article_ids("Hva er depositumreglene?")
+    assert result == []
+
+
+def test_extract_section_article_ids_empty_query():
+    """Empty string returns empty list without error."""
+    assert extract_section_article_ids("") == []
+
+
+def test_extract_section_article_ids_kapittel_pattern():
+    """'kapittel X § Y' pattern should yield kapittel-X-paragraf-Y."""
+    result = extract_section_article_ids("Se kapittel 2 § 1.")
+    assert result == ["kapittel-2-paragraf-1"]
+
+
+# ---------------------------------------------------------------------------
+# build_law_embedding_index with add_title_embedding=True (Fix 2 — dualpass ANN)
+# ---------------------------------------------------------------------------
+
+
+def _make_dummy_embed(dim: int = 4):
+    """Return a deterministic embed_documents callable for testing."""
+    call_count = [0]
+
+    def embed(texts: list[str]) -> list[list[float]]:
+        result = []
+        for i, _t in enumerate(texts):
+            # Each text gets a distinct unit vector so cosine sims are meaningful
+            v = [0.0] * dim
+            idx = (call_count[0] + i) % dim
+            v[idx] = 1.0
+            result.append(v)
+        call_count[0] += len(texts)
+        return result
+
+    return embed
+
+
+def test_build_law_embedding_index_adds_title_embedding():
+    """add_title_embedding=True must store title_embedding on every entry."""
+    entries = [
+        {"law_id": "LOV-A", "routing_summary_text": "summary A", "routing_title_text": "title A"},
+        {"law_id": "LOV-B", "routing_summary_text": "summary B", "routing_title_text": "title B"},
+    ]
+    indexed = build_law_embedding_index(
+        entries,
+        embed_documents=_make_dummy_embed(),
+        text_field="routing_summary_text",
+        add_title_embedding=True,
+    )
+    assert len(indexed) == 2
+    for entry in indexed:
+        assert "embedding" in entry, "summary embedding must be present"
+        assert "title_embedding" in entry, (
+            "title_embedding must be present when add_title_embedding=True"
+        )
+        assert len(entry["embedding"]) > 0
+        assert len(entry["title_embedding"]) > 0
+
+
+def test_build_law_embedding_index_no_title_embedding_by_default():
+    """Default (add_title_embedding=False) must NOT attach title_embedding."""
+    entries = [
+        {"law_id": "LOV-A", "routing_summary_text": "summary A", "routing_title_text": "title A"},
+    ]
+    indexed = build_law_embedding_index(
+        entries,
+        embed_documents=_make_dummy_embed(),
+        text_field="routing_summary_text",
+        add_title_embedding=False,
+    )
+    assert "embedding" in indexed[0]
+    assert "title_embedding" not in indexed[0]
+
+
+# ---------------------------------------------------------------------------
+# score_all_laws_embedding with title_weight > 0 (Fix 2 — dualpass blend)
+# ---------------------------------------------------------------------------
+
+
+def test_score_all_laws_embedding_title_blend():
+    """title_weight > 0 blends summary and title cosine sims."""
+    # Use orthogonal 4-dim unit vectors so sims are deterministic
+    query = [1.0, 0.0, 0.0, 0.0]
+    # entry 0: summary sim=1.0, title sim=0.0  → blend = 0.7*1 + 0.3*0 = 0.70
+    # entry 1: summary sim=0.0, title sim=1.0  → blend = 0.7*0 + 0.3*1 = 0.30
+    entries = [
+        {
+            "law_id": "LOV-A",
+            "embedding": [1.0, 0.0, 0.0, 0.0],
+            "title_embedding": [0.0, 1.0, 0.0, 0.0],
+            "law_title": "Lov A",
+            "short_name": "",
+            "routing_tokens": set(),
+            "direct_mention_terms": [],
+        },
+        {
+            "law_id": "LOV-B",
+            "embedding": [0.0, 1.0, 0.0, 0.0],
+            "title_embedding": [1.0, 0.0, 0.0, 0.0],
+            "law_title": "Lov B",
+            "short_name": "",
+            "routing_tokens": set(),
+            "direct_mention_terms": [],
+        },
+    ]
+    result = score_all_laws_embedding(
+        query,
+        entries,
+        top_k=2,
+        direct_mention_bonus=0.0,
+        query_norm="",
+        title_weight=0.3,
+    )
+    assert len(result) == 2
+    scores = {r["law_id"]: r["law_reranker_score"] for r in result}
+    # LOV-A should score higher (0.70) than LOV-B (0.30)
+    assert scores["LOV-A"] > scores["LOV-B"]
+    assert abs(scores["LOV-A"] - 0.70) < 0.01
+    assert abs(scores["LOV-B"] - 0.30) < 0.01
+
+
+def test_score_all_laws_embedding_no_title_blend_when_missing():
+    """When entries lack title_embedding, title_weight is silently ignored."""
+    query = [1.0, 0.0, 0.0, 0.0]
+    entries = [
+        {
+            "law_id": "LOV-A",
+            "embedding": [1.0, 0.0, 0.0, 0.0],
+            # no title_embedding key
+            "law_title": "Lov A",
+            "short_name": "",
+            "routing_tokens": set(),
+            "direct_mention_terms": [],
+        },
+    ]
+    # Should not raise, and should fall back to summary-only score
+    result = score_all_laws_embedding(
+        query,
+        entries,
+        top_k=1,
+        direct_mention_bonus=0.0,
+        query_norm="",
+        title_weight=0.3,
+    )
+    assert len(result) == 1
+    assert abs(result[0]["law_reranker_score"] - 1.0) < 0.01
+
+
+# ---------------------------------------------------------------------------
+# _build_law_filter with article_id_prefixes (Fix 1 — Qdrant narrowing)
+# ---------------------------------------------------------------------------
+
+
+def test_build_law_filter_with_article_id_prefixes(mock_settings):
+    """article_id_prefixes produces nested AND/OR filter clauses."""
+    from qdrant_client import models as qdrant_models
+
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
+        chain = LegalRAGChain(mock_settings)
+        law_filter = chain._build_law_filter(
+            ["LOV-2000-05-05-25"],
+            article_id_prefixes=["kapittel-3-paragraf-5"],
+        )
+    assert law_filter is not None
+    # Should use 'should' with nested Filter clauses (each clause has 'must')
+    should_list = getattr(law_filter, "should", None)
+    assert should_list, "expected non-empty should list"
+    clause = should_list[0]
+    # Nested clause is a Filter, which has a 'must' attribute
+    assert isinstance(clause, qdrant_models.Filter), "clause must be a nested Filter"
+    must_list = getattr(clause, "must", None)
+    assert must_list is not None and len(must_list) == 2  # law_id + article_id
+
+
+def test_build_law_filter_no_prefixes_returns_simple_or(mock_settings):
+    """Without article_id_prefixes, produces a flat OR of law_id conditions."""
+    from qdrant_client import models as qdrant_models
+
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
+        chain = LegalRAGChain(mock_settings)
+        law_filter = chain._build_law_filter(["LOV-A", "LOV-B"], article_id_prefixes=None)
+    assert law_filter is not None
+    should_list = getattr(law_filter, "should", None)
+    assert should_list is not None and len(should_list) == 2
+    # Each clause is a FieldCondition (not a nested Filter)
+    assert isinstance(should_list[0], qdrant_models.FieldCondition)

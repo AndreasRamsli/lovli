@@ -241,12 +241,19 @@ def _compute_balanced_score(metrics: dict) -> float:
     Composite score balancing positive accuracy and negative guardrails.
 
     Weights prioritize answer quality while still penalizing contamination/noise.
+
+    v2 calibration (2026-02-23):
+    - Raised unexpected_citation_rate penalty 0.07 → 0.15 (dominant failure mode at 0.689)
+    - Raised citation_precision reward 0.10 → 0.15 (target metric)
+    - Reduced false_positive_gating_rate penalty 0.10 → 0.08 (partially addressed by threshold fix)
+    - Reduced coverage_weighted_positive_recall 0.20 → 0.16 to balance total weights ~1.0
+    Total weights: accuracy=0.61, abstention=0.30, penalties=0.36 (net ~0.55 positive bias)
     """
     accuracy_component = (
         (0.16 * metrics.get("recall_at_k", 0.0))
-        + (0.20 * metrics.get("coverage_weighted_positive_recall", 0.0))
+        + (0.16 * metrics.get("coverage_weighted_positive_recall", 0.0))
         + (0.14 * metrics.get("mean_expected_coverage", 0.0))
-        + (0.10 * metrics.get("citation_precision", 0.0))
+        + (0.15 * metrics.get("citation_precision", 0.0))
         + (0.05 * metrics.get("multi_article_recall_at_k", 0.0))
     )
     abstention_component = (
@@ -256,8 +263,8 @@ def _compute_balanced_score(metrics: dict) -> float:
     )
     penalties = (
         (0.08 * metrics.get("law_contamination_rate", 0.0))
-        + (0.07 * metrics.get("unexpected_citation_rate", 0.0))
-        + (0.10 * metrics.get("false_positive_gating_rate", 0.0))
+        + (0.15 * metrics.get("unexpected_citation_rate", 0.0))
+        + (0.08 * metrics.get("false_positive_gating_rate", 0.0))
         + (0.05 * metrics.get("source_boundary_mismatch_at_k", 0.0))
     )
     return accuracy_component + abstention_component - penalties
@@ -1054,6 +1061,8 @@ def apply_combo_to_chain(
     routing_fallback_unfiltered: bool,
     reranker_context_enrichment: bool,
     routing_summary_dualpass: bool,
+    direct_mention_bonus: float = 0.15,
+    rank_fusion_doc_weight: float = 0.63,
 ) -> None:
     """Apply sweep parameters to an existing chain instance."""
     chain.settings.retrieval_k_initial = retrieval_k_initial
@@ -1065,6 +1074,9 @@ def apply_combo_to_chain(
     chain.settings.law_routing_fallback_unfiltered = routing_fallback_unfiltered
     chain.settings.reranker_context_enrichment_enabled = reranker_context_enrichment
     chain.settings.law_routing_summary_dualpass_enabled = routing_summary_dualpass
+    if hasattr(chain.settings, "law_routing_direct_mention_bonus"):
+        chain.settings.law_routing_direct_mention_bonus = direct_mention_bonus
+    chain.settings.law_rank_fusion_weight_doc_score = rank_fusion_doc_weight
 
 
 def main() -> None:
@@ -1113,6 +1125,10 @@ def main() -> None:
         "law_routing_fallback_unfiltered": settings.law_routing_fallback_unfiltered,
         "reranker_context_enrichment_enabled": settings.reranker_context_enrichment_enabled,
         "law_routing_summary_dualpass_enabled": settings.law_routing_summary_dualpass_enabled,
+        "law_routing_direct_mention_bonus": float(
+            getattr(settings, "law_routing_direct_mention_bonus", 0.15)
+        ),
+        "law_rank_fusion_weight_doc_score": float(settings.law_rank_fusion_weight_doc_score),
         "law_coherence_dominant_concentration_threshold": settings.law_coherence_dominant_concentration_threshold,
         "law_routing_stage1_min_docs": settings.law_routing_stage1_min_docs,
         "law_routing_stage1_min_top_score": settings.law_routing_stage1_min_top_score,
@@ -1133,6 +1149,8 @@ def main() -> None:
     routing_fallback_unfiltered_values: list[bool] = []
     reranker_context_enrichment_values: list[bool] = []
     routing_summary_dualpass_values: list[bool] = []
+    direct_mention_bonus_values: list[float] = []
+    rank_fusion_doc_weight_values: list[float] = []
     if quick_grid:
         retrieval_k_initial_values = [int(settings.retrieval_k_initial)]
         retrieval_k_values = [int(settings.retrieval_k)]
@@ -1143,6 +1161,10 @@ def main() -> None:
         routing_fallback_unfiltered_values = [bool(settings.law_routing_fallback_unfiltered)]
         reranker_context_enrichment_values = [bool(settings.reranker_context_enrichment_enabled)]
         routing_summary_dualpass_values = [bool(settings.law_routing_summary_dualpass_enabled)]
+        direct_mention_bonus_values = [
+            float(getattr(settings, "law_routing_direct_mention_bonus", 0.15))
+        ]
+        rank_fusion_doc_weight_values = [float(settings.law_rank_fusion_weight_doc_score)]
         logger.info("SWEEP_QUICK_GRID=true: using profile-default values only (single combo)")
     elif debug_grid:
         retrieval_k_initial_values = [int(settings.retrieval_k_initial)]
@@ -1154,6 +1176,10 @@ def main() -> None:
         routing_fallback_unfiltered_values = [bool(settings.law_routing_fallback_unfiltered)]
         reranker_context_enrichment_values = [bool(settings.reranker_context_enrichment_enabled)]
         routing_summary_dualpass_values = [bool(settings.law_routing_summary_dualpass_enabled)]
+        direct_mention_bonus_values = [
+            float(getattr(settings, "law_routing_direct_mention_bonus", 0.15))
+        ]
+        rank_fusion_doc_weight_values = [float(settings.law_rank_fusion_weight_doc_score)]
         logger.info(
             "SWEEP_DEBUG_MODE=true: using focused debug grid (%dx%dx%d=%d combos)",
             len(retrieval_k_values),
@@ -1171,17 +1197,28 @@ def main() -> None:
             float(settings.reranker_confidence_threshold),
         )
         min_doc_values = _with_default_value(
-            [0.25, 0.35, 0.45, 0.55],
+            [0.25, 0.35, 0.42, 0.55],
             float(settings.reranker_min_doc_score),
         )
+        # Extended to include balanced_v2 values (0.12) and wider ceiling (0.80)
         min_gap_values = _with_default_value(
-            [0.05, 0.10], float(settings.reranker_ambiguity_min_gap)
+            [0.05, 0.10, 0.12, 0.15], float(settings.reranker_ambiguity_min_gap)
         )
         top_score_ceiling_values = _with_default_value(
-            [0.60, 0.70],
+            [0.60, 0.70, 0.80],
             float(settings.reranker_ambiguity_top_score_ceiling),
         )
         routing_fallback_unfiltered_values = [True, False]
+        # direct_mention_bonus: coarse grid around default (0.15) and profile value (0.20)
+        direct_mention_bonus_values = _with_default_value(
+            [0.10, 0.15, 0.20, 0.25],
+            float(getattr(settings, "law_routing_direct_mention_bonus", 0.15)),
+        )
+        # rank_fusion doc_score weight: coarse grid around profile value (0.63)
+        rank_fusion_doc_weight_values = _with_default_value(
+            [0.50, 0.55, 0.63, 0.70, 0.75],
+            float(settings.law_rank_fusion_weight_doc_score),
+        )
     if not quick_grid and not debug_grid:
         if bool(settings.law_routing_fallback_unfiltered) not in routing_fallback_unfiltered_values:
             routing_fallback_unfiltered_values.append(
@@ -1216,7 +1253,8 @@ def main() -> None:
     logger.info("Frozen core subset size: %s", core_count)
     logger.info(
         "Sweep grid values: k_init=%s k=%s conf=%s min_doc=%s min_gap=%s top_ceiling=%s "
-        "route_unfiltered=%s reranker_ctx=%s dualpass=%s",
+        "route_unfiltered=%s reranker_ctx=%s dualpass=%s direct_mention_bonus=%s "
+        "rank_fusion_doc_weight=%s",
         retrieval_k_initial_values,
         retrieval_k_values,
         confidence_values,
@@ -1226,6 +1264,8 @@ def main() -> None:
         routing_fallback_unfiltered_values,
         reranker_context_enrichment_values,
         routing_summary_dualpass_values,
+        direct_mention_bonus_values,
+        rank_fusion_doc_weight_values,
     )
     logger.info("Starting retrieval sweep...")
     chain = LegalRAGChain(settings=settings)
@@ -1393,6 +1433,8 @@ def main() -> None:
         * len(routing_fallback_unfiltered_values)
         * len(reranker_context_enrichment_values)
         * len(routing_summary_dualpass_values)
+        * len(direct_mention_bonus_values)
+        * len(rank_fusion_doc_weight_values)
     )
     logger.info("Total combos to evaluate: %d", total_combos)
 
@@ -1408,6 +1450,8 @@ def main() -> None:
                 r.get("law_routing_fallback_unfiltered"),
                 r.get("reranker_context_enrichment_enabled"),
                 r.get("law_routing_summary_dualpass_enabled"),
+                r.get("law_routing_direct_mention_bonus"),
+                r.get("law_rank_fusion_weight_doc_score"),
             )
             for r in rows
         }
@@ -1425,6 +1469,8 @@ def main() -> None:
         routing_fallback_unfiltered,
         reranker_context_enrichment,
         routing_summary_dualpass,
+        direct_mention_bonus,
+        rank_fusion_doc_weight,
     ) in itertools.product(
         retrieval_k_initial_values,
         retrieval_k_values,
@@ -1435,6 +1481,8 @@ def main() -> None:
         routing_fallback_unfiltered_values,
         reranker_context_enrichment_values,
         routing_summary_dualpass_values,
+        direct_mention_bonus_values,
+        rank_fusion_doc_weight_values,
     ):
         combo_key = (
             retrieval_k_initial,
@@ -1446,6 +1494,8 @@ def main() -> None:
             routing_fallback_unfiltered,
             reranker_context_enrichment,
             routing_summary_dualpass,
+            direct_mention_bonus,
+            rank_fusion_doc_weight,
         )
         if combo_key in existing_combo_keys:
             continue
@@ -1460,6 +1510,8 @@ def main() -> None:
             routing_fallback_unfiltered,
             reranker_context_enrichment,
             routing_summary_dualpass,
+            direct_mention_bonus=direct_mention_bonus,
+            rank_fusion_doc_weight=rank_fusion_doc_weight,
         )
         metrics = evaluate_combo(
             chain,
@@ -1490,6 +1542,8 @@ def main() -> None:
             "law_routing_fallback_unfiltered": routing_fallback_unfiltered,
             "reranker_context_enrichment_enabled": reranker_context_enrichment,
             "law_routing_summary_dualpass_enabled": routing_summary_dualpass,
+            "law_routing_direct_mention_bonus": direct_mention_bonus,
+            "law_rank_fusion_weight_doc_score": rank_fusion_doc_weight,
             "law_coherence_dominant_concentration_threshold": (
                 chain.settings.law_coherence_dominant_concentration_threshold
             ),
@@ -1502,7 +1556,8 @@ def main() -> None:
         rows.append(row)
         logger.info(
             "k_init=%s k=%s conf=%.2f min_doc=%.2f min_gap=%.2f top_ceiling=%.2f "
-            "route_unfiltered=%s reranker_ctx=%s dualpass=%s -> "
+            "route_unfiltered=%s reranker_ctx=%s dualpass=%s "
+            "dmbonus=%.2f rfusion_doc=%.2f -> "
             "balanced=%.3f recall=%.3f coverage=%.3f precision=%.3f unexpected=%.3f "
             "law_contam=%.3f coherence_dropped=%s "
             "fp_gate=%.3f cw_recall=%.3f mrr5=%.3f r@1=%.3f r@3=%.3f r@5=%.3f "
@@ -1519,6 +1574,8 @@ def main() -> None:
             routing_fallback_unfiltered,
             reranker_context_enrichment,
             routing_summary_dualpass,
+            direct_mention_bonus,
+            rank_fusion_doc_weight,
             metrics["balanced_score"],
             metrics["recall_at_k"],
             metrics["mean_expected_coverage"],

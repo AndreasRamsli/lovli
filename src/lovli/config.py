@@ -216,6 +216,18 @@ class Settings(BaseSettings):
             "routing_summary_text is recommended: focused, avoids noisy keywords."
         ),
     )
+    law_routing_direct_mention_bonus: float = Field(
+        default=0.15,
+        ge=0.0,
+        le=0.5,
+        description=(
+            "Score bonus added to a law's embedding similarity when its normalised "
+            "short name or title appears verbatim in the query (e.g. 'husleieloven'). "
+            "Applied before clamping to [0, 1]. Higher values ensure explicitly-named "
+            "laws rank first even when their embedding similarity is marginal. "
+            "Set to 0.0 to disable."
+        ),
+    )
     law_catalog_path: str = Field(
         default="data/law_catalog.json",
         description="Path to the law catalog JSON used for routing.",

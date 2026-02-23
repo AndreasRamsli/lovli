@@ -30,6 +30,7 @@ from .scoring import (
 from .routing import (
     build_law_embedding_index,
     build_routing_entries,
+    extract_section_article_ids,
     score_all_laws_embedding,
     score_law_candidates_lexical,
     score_law_candidates_reranker,
@@ -285,10 +286,17 @@ Kontekst fra lovtekster:
                 # Track at: https://github.com/AndreasRamsli/lovli/issues
                 if self.settings.law_routing_embedding_enabled:
                     try:
+                        # When dualpass is enabled, also embed routing_title_text so
+                        # score_all_laws_embedding can blend summary and title cosine
+                        # similarities at query time.  This is the real dualpass ANN fix:
+                        # previously the dualpass flag only toggled a cross-encoder path
+                        # that is unreachable in the ANN routing mode.
+                        add_title = bool(self.settings.law_routing_summary_dualpass_enabled)
                         self._law_catalog_entries = build_law_embedding_index(
                             self._law_catalog_entries,
                             embed_documents=self.embeddings.embed_documents,
                             text_field=self.settings.law_routing_embedding_text_field,
+                            add_title_embedding=add_title,
                         )
                     except Exception as emb_err:
                         logger.warning(
@@ -860,11 +868,23 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
                 try:
                     query_embedding = self.embeddings.embed_query(query)
                     query_norm = _normalize_law_mention(query)
+                    # When dualpass is enabled and title_embeddings were built at startup,
+                    # blend summary and title cosine sims.  The title blend weight is the
+                    # dualpass_title_weight setting (default 0.35).
+                    title_weight = (
+                        float(self.settings.law_routing_dualpass_title_weight)
+                        if self.settings.law_routing_summary_dualpass_enabled
+                        else 0.0
+                    )
                     scored_candidates = score_all_laws_embedding(
                         query_embedding,
                         self._law_catalog_entries,
                         top_k=self.settings.law_routing_prefilter_k,
                         query_norm=query_norm,
+                        direct_mention_bonus=float(
+                            getattr(self.settings, "law_routing_direct_mention_bonus", 0.15)
+                        ),
+                        title_weight=title_weight,
                     )
                     if not scored_candidates:
                         self._last_routing_diagnostics = {
@@ -1091,19 +1111,72 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
         logger.debug("Law routing candidates for '%s': %s", query, routed)
         return routed
 
-    def _build_law_filter(self, law_ids: list[str]) -> qdrant_models.Filter | None:
-        """Build Qdrant payload filter for metadata.law_id."""
+    def _build_law_filter(
+        self,
+        law_ids: list[str],
+        article_id_prefixes: list[str] | None = None,
+    ) -> qdrant_models.Filter | None:
+        """Build Qdrant payload filter for metadata.law_id, with optional article narrowing.
+
+        When ``article_id_prefixes`` is provided (non-empty), each prefix is combined
+        with the law_id filter using a nested AND so that only articles whose
+        ``metadata.article_id`` starts with the given prefix are returned.  This is
+        used when the query contains an explicit section reference such as "§ 3-5",
+        which ``extract_section_article_ids`` converts to "kapittel-3-paragraf-5".
+
+        The Qdrant ``MatchText`` condition performs a substring/prefix match on the
+        payload field value, so "kapittel-3-paragraf-5" will match
+        "kapittel-3-paragraf-5", "kapittel-3-paragraf-5a", etc.
+
+        Args:
+            law_ids: List of law_id strings to filter on.
+            article_id_prefixes: Optional list of article_id prefix strings derived
+                from explicit section references in the query.
+        """
         if not law_ids:
             return None
-        return qdrant_models.Filter(
-            should=[
-                qdrant_models.FieldCondition(
-                    key="metadata.law_id",
-                    match=qdrant_models.MatchValue(value=law_id),
+
+        if not article_id_prefixes:
+            # No section reference in query — filter by law only (original behaviour)
+            return qdrant_models.Filter(
+                should=[
+                    qdrant_models.FieldCondition(
+                        key="metadata.law_id",
+                        match=qdrant_models.MatchValue(value=law_id),
+                    )
+                    for law_id in law_ids
+                ]
+            )
+
+        # Section reference detected: each (law_id × article_prefix) pair forms one
+        # AND clause; all clauses are OR-combined in the outer should list.
+        # This means: "any article in law A that starts with prefix P1, OR
+        #              any article in law A that starts with prefix P2, OR
+        #              any article in law B that starts with prefix P1, ..."
+        should_clauses: list[qdrant_models.Filter] = []
+        for law_id in law_ids:
+            for prefix in article_id_prefixes:
+                should_clauses.append(
+                    qdrant_models.Filter(
+                        must=[
+                            qdrant_models.FieldCondition(
+                                key="metadata.law_id",
+                                match=qdrant_models.MatchValue(value=law_id),
+                            ),
+                            qdrant_models.FieldCondition(
+                                key="metadata.article_id",
+                                match=qdrant_models.MatchText(text=prefix),
+                            ),
+                        ]
+                    )
                 )
-                for law_id in law_ids
-            ]
+        logger.debug(
+            "_build_law_filter: article narrowing active — %d law(s) × %d prefix(es) = %d clauses",
+            len(law_ids),
+            len(article_id_prefixes),
+            len(should_clauses),
         )
+        return qdrant_models.Filter(should=should_clauses)
 
     def _invoke_retriever(self, query: str, routed_law_ids: list[str] | None = None):
         """Invoke retriever with optional law_id filter; fallback to unfiltered on errors."""
@@ -1112,7 +1185,20 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
         if not routed_law_ids:
             return self.retriever.invoke(query)
 
-        law_filter = self._build_law_filter(routed_law_ids)
+        # Extract explicit section references from the query (e.g. "§ 3-5" → "kapittel-3-paragraf-5").
+        # When present, narrow the Qdrant filter to article_ids that start with that prefix,
+        # attacking the dominant boundary_level_b wrong-article-same-law failure mode directly.
+        article_id_prefixes = extract_section_article_ids(query)
+        if article_id_prefixes:
+            logger.debug(
+                "_invoke_retriever: article narrowing from query section refs: %s",
+                article_id_prefixes,
+            )
+        self._last_routing_diagnostics["article_id_prefixes"] = article_id_prefixes
+
+        law_filter = self._build_law_filter(
+            routed_law_ids, article_id_prefixes=article_id_prefixes or None
+        )
         stage1_docs = []
         try:
             filtered_retriever = self.vectorstore.as_retriever(

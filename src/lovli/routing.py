@@ -420,11 +420,38 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+def _embed_texts_batched(
+    texts: list[str],
+    embed_documents: Callable[[list[str]], list[list[float]]],
+    batch_size: int = 64,
+    label: str = "",
+) -> list[list[float]]:
+    """Embed a list of texts in batches, filling failed batches with zero vectors."""
+    all_embeddings: list[list[float]] = []
+    for start in range(0, len(texts), batch_size):
+        batch = texts[start : start + batch_size]
+        try:
+            batch_embs = embed_documents(batch)
+            all_embeddings.extend(batch_embs)
+        except Exception as exc:
+            logger.warning(
+                "Law embedding batch %d-%d failed%s: %s — filling with zeros",
+                start,
+                start + len(batch),
+                f" ({label})" if label else "",
+                exc,
+            )
+            dim = len(all_embeddings[0]) if all_embeddings else 1024
+            all_embeddings.extend([[0.0] * dim for _ in batch])
+    return all_embeddings
+
+
 def build_law_embedding_index(
     catalog_entries: list[dict[str, Any]],
     embed_documents: Callable[[list[str]], list[list[float]]],
     text_field: str = "routing_summary_text",
     batch_size: int = 64,
+    add_title_embedding: bool = False,
 ) -> list[dict[str, Any]]:
     """Embed law routing texts and attach the embedding vectors to each entry.
 
@@ -432,15 +459,22 @@ def build_law_embedding_index(
     ``embedding`` key added. Entries without a non-empty text in ``text_field``
     fall back to ``routing_text``, then ``routing_title_text``.
 
+    When ``add_title_embedding=True`` a second pass is run over ``routing_title_text``
+    (title + short_name + ref) and stored as ``title_embedding``.  This powers the
+    dual-pass ANN routing mode where the summary-pass and title-pass cosine scores
+    are blended before ranking.
+
     Args:
         catalog_entries: Precomputed routing entries from ``build_routing_entries``.
         embed_documents: Callable that takes a list of strings and returns a list
             of float vectors (e.g. ``HuggingFaceEmbeddings.embed_documents``).
         text_field: Which routing text field to embed (default: routing_summary_text).
         batch_size: Batch size passed to the embedding model.
+        add_title_embedding: If True, also embed ``routing_title_text`` and attach
+            as ``title_embedding``.
 
     Returns:
-        Entries with ``embedding`` list[float] attached.
+        Entries with ``embedding`` (and optionally ``title_embedding``) list[float] attached.
     """
     if not catalog_entries:
         return catalog_entries
@@ -454,31 +488,68 @@ def build_law_embedding_index(
             text = (entry.get("routing_title_text") or entry.get("law_title") or "").strip()
         texts.append(text)
 
-    # Embed in batches to avoid OOM on large catalogs
-    all_embeddings: list[list[float]] = []
-    for start in range(0, len(texts), batch_size):
-        batch = texts[start : start + batch_size]
-        try:
-            batch_embs = embed_documents(batch)
-            all_embeddings.extend(batch_embs)
-        except Exception as exc:
-            logger.warning(
-                "Law embedding batch %d-%d failed: %s — filling with zeros",
-                start,
-                start + len(batch),
-                exc,
-            )
-            dim = len(all_embeddings[0]) if all_embeddings else 1024
-            all_embeddings.extend([[0.0] * dim for _ in batch])
+    all_embeddings = _embed_texts_batched(texts, embed_documents, batch_size, label=text_field)
+
+    title_embeddings: list[list[float]] | None = None
+    if add_title_embedding:
+        title_texts: list[str] = [
+            (entry.get("routing_title_text") or entry.get("law_title") or "").strip()
+            for entry in catalog_entries
+        ]
+        title_embeddings = _embed_texts_batched(
+            title_texts, embed_documents, batch_size, label="routing_title_text"
+        )
+        logger.info(
+            "Built law title embedding index: %d laws embedded (routing_title_text)",
+            len(catalog_entries),
+        )
 
     indexed: list[dict[str, Any]] = []
-    for entry, emb in zip(catalog_entries, all_embeddings):
+    for i, (entry, emb) in enumerate(zip(catalog_entries, all_embeddings)):
         new_entry = dict(entry)
         new_entry["embedding"] = emb
+        if title_embeddings is not None:
+            new_entry["title_embedding"] = title_embeddings[i]
         indexed.append(new_entry)
 
     logger.info("Built law embedding index: %d laws embedded (field=%s)", len(indexed), text_field)
     return indexed
+
+
+def _cosine_sims_numpy(
+    query_embedding: list[float],
+    embeddings: list[list[float]],
+) -> list[float]:
+    """Compute cosine similarities between a query and a list of embeddings.
+
+    Uses numpy when available (vectorised matmul), falls back to pure Python.
+    Returns a list of floats in [0, 1] aligned with ``embeddings``.
+    """
+    if _NUMPY_AVAILABLE:
+        assert _np_module is not None
+        _np = _np_module
+        q = _np.array(query_embedding, dtype=_np.float32)
+        q_norm = _np.linalg.norm(q)
+        if q_norm == 0.0:
+            return [0.0] * len(embeddings)
+        q_unit = q / q_norm
+        mat = _np.array(embeddings, dtype=_np.float32)
+        norms = _np.linalg.norm(mat, axis=1, keepdims=True)
+        norms = _np.where(norms == 0.0, 1.0, norms)
+        mat_unit = mat / norms
+        sims = _np.clip(mat_unit @ q_unit, 0.0, 1.0)
+        return sims.tolist()
+    else:
+        q_norm = math.sqrt(sum(x * x for x in query_embedding))
+        if q_norm == 0.0:
+            return [0.0] * len(embeddings)
+        result = []
+        for emb in embeddings:
+            try:
+                result.append(max(0.0, min(1.0, _cosine_similarity(query_embedding, emb))))
+            except Exception:
+                result.append(0.0)
+        return result
 
 
 def score_all_laws_embedding(
@@ -488,6 +559,7 @@ def score_all_laws_embedding(
     top_k: int = 80,
     direct_mention_bonus: float = 0.15,
     query_norm: str = "",
+    title_weight: float = 0.0,
 ) -> list[dict[str, Any]]:
     """Score ALL catalog entries by embedding cosine similarity and return top-k.
 
@@ -503,6 +575,13 @@ def score_all_laws_embedding(
     short name or title appears verbatim in the query, preserving the benefit of
     exact law name detection without gating on token overlap.
 
+    When ``title_weight > 0`` and entries have a ``title_embedding`` key (populated
+    by ``build_law_embedding_index(add_title_embedding=True)``), a dual-pass blend
+    is computed:
+        blended_sim = (1 - title_weight) * summary_sim + title_weight * title_sim
+    This is the real dual-pass ANN fix — the previous ``dualpass`` flag only
+    toggled a cross-encoder path that is unreachable in ANN mode.
+
     Args:
         query_embedding: Dense float vector for the query (pre-computed by caller).
         catalog_entries: All catalog entries with ``embedding`` keys attached
@@ -513,6 +592,9 @@ def score_all_laws_embedding(
             to [0, 1]. Set to 0.0 to disable.
         query_norm: Normalised query string for direct-mention detection
             (``normalize_law_mention(query)``). Pass empty string to skip.
+        title_weight: Blend weight for ``title_embedding`` cosine similarity.
+            0.0 (default) → pure summary-pass, no blending. Values in [0.1, 0.4]
+            are recommended when ``title_embedding`` is populated.
 
     Returns:
         List of up to ``top_k`` candidate dicts sorted descending by
@@ -527,41 +609,35 @@ def score_all_laws_embedding(
     if not valid_entries:
         return []
 
-    if _NUMPY_AVAILABLE:
-        # Vectorised path: one matrix multiply for all similarities
-        assert _np_module is not None  # _NUMPY_AVAILABLE guarantees successful import
-        _np = _np_module
-        q = _np.array(query_embedding, dtype=_np.float32)
-        q_norm = _np.linalg.norm(q)
-        if q_norm == 0.0:
-            return []
-        q_unit = q / q_norm
+    summary_sims = _cosine_sims_numpy(query_embedding, [e["embedding"] for e in valid_entries])
 
-        # Stack catalog embeddings into (n_laws, dim) matrix
-        mat = _np.array([e["embedding"] for e in valid_entries], dtype=_np.float32)
-        norms = _np.linalg.norm(mat, axis=1, keepdims=True)
-        # Avoid division by zero for zero-norm rows
-        norms = _np.where(norms == 0.0, 1.0, norms)
-        mat_unit = mat / norms
-        sims = mat_unit @ q_unit  # (n_laws,)
-        sims = _np.clip(sims, 0.0, 1.0)
-        sim_list: list[float] = sims.tolist()
-    else:
-        # Pure-Python fallback — correct but slower for large catalogs
-        q_norm = math.sqrt(sum(x * x for x in query_embedding))
-        if q_norm == 0.0:
-            return []
-        sim_list = []
-        for entry in valid_entries:
-            emb = entry["embedding"]
-            try:
-                sim_list.append(max(0.0, min(1.0, _cosine_similarity(query_embedding, emb))))
-            except Exception:
-                sim_list.append(0.0)
+    # Dual-pass: blend with title_embedding cosine sims when title_weight > 0
+    title_sims: list[float] | None = None
+    if title_weight > 0.0:
+        entries_with_title = [e for e in valid_entries if e.get("title_embedding") is not None]
+        if len(entries_with_title) == len(valid_entries):
+            title_sims = _cosine_sims_numpy(
+                query_embedding, [e["title_embedding"] for e in valid_entries]
+            )
+        else:
+            logger.debug(
+                "score_all_laws_embedding: title_weight=%.2f requested but only %d/%d entries "
+                "have title_embedding — skipping title blend (run build_law_embedding_index "
+                "with add_title_embedding=True to enable dual-pass ANN routing)",
+                title_weight,
+                len(entries_with_title),
+                len(valid_entries),
+            )
 
-    # Build result list with direct-mention bonus
+    # Build result list with direct-mention bonus and optional title blend
     scored: list[dict[str, Any]] = []
-    for entry, sim in zip(valid_entries, sim_list):
+    for i, (entry, summary_sim) in enumerate(zip(valid_entries, summary_sims)):
+        if title_sims is not None:
+            sim = (1.0 - title_weight) * summary_sim + title_weight * title_sims[i]
+            sim = max(0.0, min(1.0, sim))
+        else:
+            sim = summary_sim
+
         bonus = 0.0
         if query_norm and direct_mention_bonus > 0.0:
             short_name = entry.get("short_name_normalized") or ""
@@ -583,7 +659,7 @@ def score_all_laws_embedding(
                 # downstream field compatibility (uncertainty fallback, diagnostics).
                 "lexical_score": 0,
                 "direct_mention": bonus > 0.0,
-                "law_embedding_sim": float(sim),
+                "law_embedding_sim": float(summary_sim),
                 "law_reranker_score": score,
             }
         )
