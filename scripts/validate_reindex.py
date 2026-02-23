@@ -33,8 +33,8 @@ from qdrant_client import QdrantClient
 ROOT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT_DIR / "src"))
 
-from lovli.chain import LegalRAGChain  # noqa: E402
-from lovli.config import get_settings  # noqa: E402
+from lovli.chain import LegalRAGChain
+from lovli.config import get_settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)

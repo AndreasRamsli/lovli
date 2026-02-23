@@ -19,7 +19,7 @@ import subprocess
 import sys
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from pathlib import Path
 from statistics import mean
 from typing import Any
@@ -30,10 +30,10 @@ from dotenv import load_dotenv
 ROOT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT_DIR / "src"))
 
-from lovli.chain import LegalRAGChain  # noqa: E402
-from lovli.config import get_settings  # noqa: E402
-from lovli.scoring import matches_expected_source  # noqa: E402
-from lovli.profiles import apply_trust_profile  # noqa: E402
+from lovli.chain import LegalRAGChain
+from lovli.config import get_settings
+from lovli.scoring import matches_expected_source
+from lovli.profiles import apply_trust_profile
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -90,7 +90,7 @@ def _contamination_cache_key(
 def load_questions(path: Path) -> list[dict[str, Any]]:
     """Load jsonl questions."""
     questions: list[dict[str, Any]] = []
-    with open(path, "r", encoding="utf-8") as handle:
+    with open(path, encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
             if line:
@@ -148,7 +148,7 @@ def analyze_question(
 
     # Keep provision docs only in diagnostics.
     provision_rows: list[dict[str, Any]] = []
-    for doc, score in zip(reranked_docs, scores):
+    for doc, score in zip(reranked_docs, scores, strict=True):
         metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
         if (metadata.get("doc_type") or "provision") == "editorial_note":
             continue
@@ -183,7 +183,7 @@ def analyze_question(
 
     dominant_law = law_stats[0]["law_id"] if law_stats else None
     dominant_avg_score = law_stats[0]["avg_score"] if law_stats else None
-    foreign_laws = [entry for entry in law_stats[1:]]
+    foreign_laws = law_stats[1:]
 
     has_contamination = len(law_stats) > 1
     singleton_foreign_laws = sum(1 for entry in foreign_laws if entry["count"] == 1)
@@ -585,10 +585,10 @@ def main() -> None:
     settings = get_settings()
     profile_name = os.getenv("TRUST_PROFILE", settings.trust_profile_name)
     resolved_profile = apply_trust_profile(settings, profile_name)
-    run_started_at = datetime.now(timezone.utc).isoformat()
+    run_started_at = datetime.now(UTC).isoformat()
     run_id = (
         os.getenv("LOVLI_RUN_ID")
-        or f"contam_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        or f"contam_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
     )
     git_commit = _safe_git_commit()
     questions_sha256 = _sha256_file(args.questions)
@@ -634,7 +634,7 @@ def main() -> None:
     cache_path = cache_dir / f"contamination_report_{key_hash}.json" if cache_dir else None
     if cache_path and cache_path.exists():
         try:
-            with open(cache_path, "r", encoding="utf-8") as f:
+            with open(cache_path, encoding="utf-8") as f:
                 cached = json.load(f)
             meta = cached.get("artifact_metadata") or {}
             if (
@@ -696,7 +696,7 @@ def main() -> None:
         "artifact_type": "law_contamination_report",
         "run_id": run_id,
         "run_started_at": run_started_at,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "git_commit": git_commit,
         "trust_profile_name": settings.trust_profile_name,
         "trust_profile_version": settings.trust_profile_version,

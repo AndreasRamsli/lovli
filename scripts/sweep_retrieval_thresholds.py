@@ -15,7 +15,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 try:
     from dotenv import load_dotenv
@@ -26,10 +26,10 @@ except ImportError:  # pragma: no cover - optional in some environments
 ROOT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT_DIR / "src"))
 
-from lovli.chain import LegalRAGChain  # noqa: E402
-from lovli.config import get_settings  # noqa: E402
-from lovli.eval import infer_negative_type, validate_questions  # noqa: E402
-from lovli.scoring import (  # noqa: E402
+from lovli.chain import LegalRAGChain
+from lovli.config import get_settings
+from lovli.eval import infer_negative_type, validate_questions
+from lovli.scoring import (
     _infer_doc_type,
     apply_uncertainty_law_cap,
     build_law_aware_rank_fusion,
@@ -38,7 +38,7 @@ from lovli.scoring import (  # noqa: E402
     matches_expected_source,
     normalize_sigmoid_scores,
 )
-from lovli.profiles import apply_trust_profile  # noqa: E402
+from lovli.profiles import apply_trust_profile
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -107,7 +107,7 @@ def _article_family(article_id: str) -> str:
 
 def load_questions(path: Path) -> list[dict]:
     questions: list[dict] = []
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -368,7 +368,7 @@ def _process_single_question(
         else:
             raw_scores = [1.0] * len(docs)
         normalized = normalize_sigmoid_scores(raw_scores)
-        for doc, score in zip(docs, normalized):
+        for doc, score in zip(docs, normalized, strict=True):
             metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
             candidates.append(
                 {
@@ -393,7 +393,7 @@ def _process_single_question(
         "negative_type": infer_negative_type(row),
         "is_core": row.get("id") in CORE_QUESTION_IDS,
         "routing_is_uncertain": bool(
-            ((route_diag_after.get("routing_confidence") or {}).get("is_uncertain"))
+            (route_diag_after.get("routing_confidence") or {}).get("is_uncertain")
         ),
         "routing_alignment_by_law": _build_routing_alignment_map(route_diag_after),
         "retrieval_fallback_stage": route_diag_after.get("retrieval_fallback_stage"),
@@ -432,7 +432,7 @@ def precompute_candidates(
         # is also safe to call concurrently — PyTorch GPU ops serialize internally.
         # We do NOT create new LegalRAGChain instances per thread; doing so would
         # re-run build_law_embedding_index (embed_documents over all 4427 laws) on
-        # every worker, wasting ~4s × workers of H100 time and fragmenting GPU memory.
+        # every worker, wasting ~4s x workers of H100 time and fragmenting GPU memory.
         def process_with_chain(idx: int, row: dict) -> tuple[int, dict]:
             result = _process_single_question(chain, row, max_k_initial)
             return idx, result
@@ -548,7 +548,6 @@ def evaluate_combo(
         expected = set(row.get("expected_articles", []))
         expected_sources = row.get("expected_sources", []) or []
         candidates = row.get("candidates", [])
-        question = row.get("question", "")
         case_type = row.get("case_type", "single_article")
         negative_type = row.get("negative_type", "unknown")
         is_core = bool(row.get("is_core"))
@@ -682,13 +681,17 @@ def evaluate_combo(
                 expected_article_ids = {item.strip() for item in expected if item and item.strip()}
 
             # Rank-sensitive retrieval metrics on post-filter top-k.
-            def _is_relevant_at_position(cited_source: dict[str, str]) -> bool:
-                if expected_sources:
-                    return any(
-                        matches_expected_source(cited_source, exp) for exp in expected_sources
-                    )
+            # Default-argument binding snapshots loop variables to avoid closure
+            # over the last iteration's values (B023).
+            def _is_relevant_at_position(
+                cited_source: dict[str, str],
+                _exp_sources: list = expected_sources,
+                _exp_article_ids: set = expected_article_ids,
+            ) -> bool:
+                if _exp_sources:
+                    return any(matches_expected_source(cited_source, exp) for exp in _exp_sources)
                 cited_article = (cited_source.get("article_id") or "").strip()
-                return any(cited_article.startswith(exp_id) for exp_id in expected_article_ids)
+                return any(cited_article.startswith(exp_id) for exp_id in _exp_article_ids)
 
             hit_at_1 = False
             hit_at_3 = False
@@ -1097,10 +1100,10 @@ def main() -> None:
     settings = get_settings()
     profile_name = os.getenv("TRUST_PROFILE", settings.trust_profile_name)
     resolved_profile = apply_trust_profile(settings, profile_name)
-    run_started_at = datetime.now(timezone.utc).isoformat()
+    run_started_at = datetime.now(UTC).isoformat()
     run_id = (
         os.getenv("LOVLI_RUN_ID")
-        or f"sweep_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        or f"sweep_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
     )
     questions_sha256 = _sha256_file(questions_path)
     git_commit = _safe_git_commit()
@@ -1334,7 +1337,7 @@ def main() -> None:
         reranker_enabled = bool(getattr(settings, "law_routing_reranker_enabled", False))
         if cache_path and cache_path.exists():
             try:
-                with open(cache_path, "r", encoding="utf-8") as f:
+                with open(cache_path, encoding="utf-8") as f:
                     data = json.load(f)
                 if (
                     data.get("questions_sha256") == questions_sha256
@@ -1406,7 +1409,7 @@ def main() -> None:
     rows: list[dict] = []
     if enable_checkpoint and checkpoint_path.exists():
         try:
-            with open(checkpoint_path, "r", encoding="utf-8") as f:
+            with open(checkpoint_path, encoding="utf-8") as f:
                 checkpoint_data = json.load(f)
             if checkpoint_data.get("run_id") == run_id:
                 rows = checkpoint_data.get("rows", [])
@@ -1704,8 +1707,8 @@ def main() -> None:
         "source_boundary_mismatch_at_k": 0,
         "balanced_score": 0,
     }
-    delta_sums = {key: 0.0 for key in divergence_counts}
-    delta_max = {key: 0.0 for key in divergence_counts}
+    delta_sums = dict.fromkeys(divergence_counts, 0.0)
+    delta_max = dict.fromkeys(divergence_counts, 0.0)
     for pair in pair_index.values():
         if True not in pair or False not in pair:
             continue

@@ -1,6 +1,5 @@
 """Tests for utility functions."""
 
-import pytest
 from lovli.profiles import extract_chat_history
 
 

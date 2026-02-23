@@ -3,7 +3,7 @@
 import hashlib
 import json
 import logging
-from typing import Iterator
+from collections.abc import Iterator
 from pathlib import Path
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, SparseVectorParams, PointStruct
@@ -387,7 +387,7 @@ class LegalIndexer:
             )
             return {}
         try:
-            with open(catalog_path, "r", encoding="utf-8") as handle:
+            with open(catalog_path, encoding="utf-8") as handle:
                 rows = json.load(handle)
         except Exception as exc:
             logger.warning("Failed loading summary catalog %s: %s", catalog_path, exc)

@@ -20,7 +20,6 @@ import argparse
 import logging
 import sys
 from pathlib import Path
-from typing import Dict, Tuple
 
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
@@ -30,14 +29,14 @@ from qdrant_client.models import PointStruct
 ROOT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT_DIR / "src"))
 
-from lovli.config import get_settings  # noqa: E402
-from lovli.parser import parse_xml_file  # noqa: E402
+from lovli.config import get_settings
+from lovli.parser import parse_xml_file
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def build_id_mapping(data_dirs: list[Path]) -> Dict[Tuple[str, str], str]:
+def build_id_mapping(data_dirs: list[Path]) -> dict[tuple[str, str], str]:
     """
     Build mapping of (law_id, old_article_id) -> canonical_article_id.
 
@@ -45,7 +44,7 @@ def build_id_mapping(data_dirs: list[Path]) -> Dict[Tuple[str, str], str]:
     `article_id` is canonicalized.  Accepts multiple directories so that both
     nl/ (lover) and sf/ (forskrifter) can be processed in a single pass.
     """
-    mapping: Dict[Tuple[str, str], str] = {}
+    mapping: dict[tuple[str, str], str] = {}
     for data_dir in data_dirs:
         xml_files = sorted(data_dir.glob("*.xml"))
         logger.info("Scanning %s XML files in %s", len(xml_files), data_dir)
@@ -58,7 +57,7 @@ def build_id_mapping(data_dirs: list[Path]) -> Dict[Tuple[str, str], str]:
 
 
 def migrate_collection(
-    client: QdrantClient, collection: str, mapping: Dict[Tuple[str, str], str], apply: bool
+    client: QdrantClient, collection: str, mapping: dict[tuple[str, str], str], apply: bool
 ) -> tuple[int, int]:
     """Migrate Qdrant payload metadata.article_id values."""
     offset = None

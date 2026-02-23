@@ -4,7 +4,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from collections.abc import Iterator
 
 from bs4 import BeautifulSoup, Tag, SoupStrainer
 
@@ -82,14 +82,15 @@ def _extract_short_name(soup: BeautifulSoup) -> str | None:
     """
     Extract law short name from header metadata.
 
-    <dd class="titleShort">Husleieloven – husll</dd>
+    <dd class="titleShort">Husleieloven \u2013 husll</dd>
     -> "Husleieloven"
     """
     short_elem = soup.find("dd", class_="titleShort")
     if short_elem:
         text = short_elem.get_text(strip=True)
-        # Split on common separators: " – ", " - ", " — "
-        for sep in (" – ", " — ", " - "):
+        # Split on common separators: en-dash, em-dash, hyphen-minus.
+        # The en/em-dash literals are intentional (matched against HTML source).
+        for sep in (" \u2013 ", " \u2014 ", " - "):
             if sep in text:
                 return text.split(sep)[0].strip()
         return text.strip() or None
@@ -259,14 +260,14 @@ def _parse_lovdata_html(xml_path: Path) -> Iterator[LegalArticle]:
     - Cross-references as <a href="lov/..."> links
     """
     try:
-        with open(xml_path, "r", encoding="utf-8") as f:
+        with open(xml_path, encoding="utf-8") as f:
             content = f.read()
     except UnicodeDecodeError as e:
         logger.error(f"Failed to decode {xml_path}: {e}")
         raise ValueError(f"Cannot decode file as UTF-8: {xml_path}") from e
-    except IOError as e:
+    except OSError as e:
         logger.error(f"Failed to read {xml_path}: {e}")
-        raise IOError(f"Cannot read file: {xml_path}") from e
+        raise OSError(f"Cannot read file: {xml_path}") from e
 
     if not content.strip():
         logger.warning(f"Empty file: {xml_path}")
@@ -694,7 +695,7 @@ def parse_law_header(xml_path: Path) -> dict:
     if not xml_path.exists():
         raise FileNotFoundError(f"File not found: {xml_path}")
 
-    with open(xml_path, "r", encoding="utf-8") as f:
+    with open(xml_path, encoding="utf-8") as f:
         content = f.read()
 
     # Use SoupStrainer to parse only the header for speed

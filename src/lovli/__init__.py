@@ -57,7 +57,7 @@ from .eval import (
     infer_negative_type,
 )
 
-__all__ = [
+__all__ = [  # noqa: RUF022 — grouped by module, not alphabetical
     # chain
     "LegalRAGChain",
     "GATED_RESPONSE",

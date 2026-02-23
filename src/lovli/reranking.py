@@ -7,7 +7,7 @@ making them independently testable and reusable.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from .scoring import normalize_sigmoid_scores
 
@@ -128,7 +128,7 @@ def rerank_documents(
         return docs, []
 
     scores = normalize_sigmoid_scores(raw_scores)
-    scored_docs = sorted(zip(docs, scores), key=lambda x: x[1], reverse=True)
+    scored_docs = sorted(zip(docs, scores, strict=True), key=lambda x: x[1], reverse=True)
     reranked_docs = [doc for doc, _ in scored_docs[:top_k]]
     reranked_scores = [score for _, score in scored_docs[:top_k]]
     return reranked_docs, reranked_scores
@@ -158,9 +158,9 @@ def filter_reranked_docs(
         return docs, scores
 
     effective_min = min(min_sources, len(docs))
-    kept = [(doc, score) for doc, score in zip(docs, scores) if score >= min_doc_score]
+    kept = [(doc, score) for doc, score in zip(docs, scores, strict=True) if score >= min_doc_score]
     if len(kept) < effective_min:
-        kept = list(zip(docs, scores))[:effective_min]
+        kept = list(zip(docs, scores, strict=True))[:effective_min]
 
     filtered_docs = [doc for doc, _ in kept]
     filtered_scores = [score for _, score in kept]
@@ -175,8 +175,8 @@ def filter_reranked_docs(
 
 
 def should_gate_answer(
-    top_score: Optional[float],
-    scores: Optional[list[float]] = None,
+    top_score: float | None,
+    scores: list[float] | None = None,
     *,
     confidence_threshold: float = 0.0,
     ambiguity_gating_enabled: bool = False,

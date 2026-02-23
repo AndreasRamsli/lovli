@@ -197,7 +197,7 @@ def run_benchmark(chain_or_settings, cached_candidates: list[dict]) -> dict:
 
     # Per-question precision deltas (only positive questions)
     deltas = []
-    for po, pn in zip(per_question_off, per_question_on):
+    for po, pn in zip(per_question_off, per_question_on, strict=True):
         if po["id"] in positive_ids:
             deltas.append(
                 {
@@ -293,7 +293,7 @@ def main() -> None:
             print(f"Using sample size from SWEEP_SAMPLE_SIZE={sample_size}")
 
     if args.cache:
-        with open(args.cache, "r", encoding="utf-8") as f:
+        with open(args.cache, encoding="utf-8") as f:
             cached_candidates = json.load(f)
         print(f"Loaded {len(cached_candidates)} cached candidates from {args.cache}")
         settings = get_settings()

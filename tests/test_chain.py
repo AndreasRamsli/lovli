@@ -1,6 +1,5 @@
 """Tests for LegalRAGChain."""
 
-import math
 import pytest
 from unittest.mock import Mock, MagicMock, patch
 from lovli.chain import LegalRAGChain

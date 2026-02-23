@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +16,7 @@ ROOT_DIR = Path(__file__).parent.parent
 
 
 def _read_json(path: Path) -> Any:
-    with open(path, "r", encoding="utf-8") as handle:
+    with open(path, encoding="utf-8") as handle:
         return json.load(handle)
 
 
@@ -76,7 +75,7 @@ def _validate_artifact_compatibility(
         contamination_meta.get("git_commit"),
         sweep_meta.get("git_commit"),
     )
-    keys_to_match = required_keys + ["trust_profile_name", "trust_profile_version"]
+    keys_to_match = [*required_keys, "trust_profile_name", "trust_profile_version"]
     mismatches: list[str] = []
     for key in keys_to_match:
         left = contamination_meta.get(key)

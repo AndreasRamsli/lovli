@@ -22,8 +22,8 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT_DIR / "src"))
 
-from lovli.indexer import _build_point_key, _generate_deterministic_id  # noqa: E402
-from lovli.parser import parse_xml_file  # noqa: E402
+from lovli.indexer import _build_point_key, _generate_deterministic_id
+from lovli.parser import parse_xml_file
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)

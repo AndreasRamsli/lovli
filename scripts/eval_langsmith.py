@@ -10,7 +10,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any
 
 from dotenv import load_dotenv
 from langsmith import Client
@@ -55,7 +55,7 @@ def get_chain() -> LegalRAGChain:
     return _chain
 
 
-def target(inputs: Dict[str, Any]) -> Dict[str, Any]:
+def target(inputs: dict[str, Any]) -> dict[str, Any]:
     """
     Target function for evaluation.
 
@@ -131,7 +131,7 @@ def matches_expected(cited_id: str, expected_set: set) -> bool:
     return False
 
 
-def _matches_expected_source(cited_source: Dict[str, Any], expected_source: Dict[str, Any]) -> bool:
+def _matches_expected_source(cited_source: dict[str, Any], expected_source: dict[str, Any]) -> bool:
     """
     Check if cited source matches expected law + article pair.
 
@@ -156,10 +156,10 @@ def create_citation_match_evaluator(settings: Settings):
     """
 
     def citation_match_evaluator(
-        inputs: Dict[str, Any],
-        outputs: Dict[str, Any],
-        reference_outputs: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        inputs: dict[str, Any],
+        outputs: dict[str, Any],
+        reference_outputs: dict[str, Any],
+    ) -> dict[str, Any]:
         """
         Evaluate citation match.
 
@@ -187,7 +187,7 @@ def create_citation_match_evaluator(settings: Settings):
 
             matched_pairs = []
             found_expected_pairs = set()
-            for idx, expected in enumerate(expected_sources):
+            for _, expected in enumerate(expected_sources):
                 for cited in cited_sources:
                     if _matches_expected_source(cited, expected):
                         pair_key = (
@@ -277,10 +277,10 @@ def create_citation_precision_evaluator():
     """Measure citation precision so noisy extra citations are penalized."""
 
     def citation_precision_evaluator(
-        inputs: Dict[str, Any],
-        outputs: Dict[str, Any],
-        reference_outputs: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        inputs: dict[str, Any],
+        outputs: dict[str, Any],
+        reference_outputs: dict[str, Any],
+    ) -> dict[str, Any]:
         expected_sources = reference_outputs.get("expected_sources", []) or []
         expected_articles = set(reference_outputs.get("expected_articles", []))
         cited_sources = outputs.get("cited_sources", []) or []
@@ -340,10 +340,10 @@ def create_offtopic_contamination_evaluator():
     """
 
     def offtopic_contamination_evaluator(
-        inputs: Dict[str, Any],
-        outputs: Dict[str, Any],
-        reference_outputs: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        inputs: dict[str, Any],
+        outputs: dict[str, Any],
+        reference_outputs: dict[str, Any],
+    ) -> dict[str, Any]:
         expected_articles = reference_outputs.get("expected_articles", [])
         if expected_articles:
             return {
@@ -382,10 +382,10 @@ def create_editorial_context_evaluator():
     """
 
     def editorial_context_evaluator(
-        inputs: Dict[str, Any],
-        outputs: Dict[str, Any],
-        reference_outputs: Dict[str, Any],
-    ) -> Dict[str, Any]:
+        inputs: dict[str, Any],
+        outputs: dict[str, Any],
+        reference_outputs: dict[str, Any],
+    ) -> dict[str, Any]:
         expects_editorial = bool(reference_outputs.get("expects_editorial_context", False))
         if not expects_editorial:
             return {
@@ -445,7 +445,7 @@ def main():
     if not questions_path.exists():
         logger.error(f"Questions file not found: {questions_path}")
         sys.exit(1)
-    with open(questions_path, "r", encoding="utf-8") as f:
+    with open(questions_path, encoding="utf-8") as f:
         questions = [json.loads(line) for line in f if line.strip()]
     validate_questions(questions, get_chain())
 
@@ -580,7 +580,7 @@ def main():
                         )
 
                 # Off-topic breakdown by negative type (parsed from evaluator comment).
-                neg_breakdown: Dict[str, list[float]] = {
+                neg_breakdown: dict[str, list[float]] = {
                     "ambiguity": [],
                     "offtopic_legal": [],
                     "offtopic_nonlegal": [],

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any
+from collections.abc import Iterable
 
 
 def _metadata_from_item(item: Any) -> dict:
     """Extract metadata from either LangChain Document-like or dict candidate."""
     if hasattr(item, "metadata"):
-        return getattr(item, "metadata") or {}
+        return item.metadata or {}
     if isinstance(item, dict):
         return item
     return {}

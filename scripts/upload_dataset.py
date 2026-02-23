@@ -78,7 +78,7 @@ def main():
     
     # Load questions from JSONL
     questions = []
-    with open(questions_path, "r", encoding="utf-8") as f:
+    with open(questions_path, encoding="utf-8") as f:
         for line in f:
             if line.strip():
                 questions.append(json.loads(line))

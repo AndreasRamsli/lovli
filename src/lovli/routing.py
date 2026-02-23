@@ -9,10 +9,11 @@ from __future__ import annotations
 import logging
 import math
 import re
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
 
 if TYPE_CHECKING:
-    import numpy as np  # pragma: no cover
+    pass  # pragma: no cover
 
 try:
     import numpy as _np_module  # type: ignore[import-untyped]
@@ -377,7 +378,7 @@ def score_law_candidates_reranker(
     fulltext_w = fulltext_weight / total_w
 
     reranked: list[dict[str, Any]] = []
-    for idx, (candidate, score) in enumerate(zip(candidates, law_scores)):
+    for idx, (candidate, score) in enumerate(zip(candidates, law_scores, strict=True)):
         item = dict(candidate)
         blended_score = score
         if dualpass_enabled and summary_scores is not None and title_scores is not None:
@@ -416,7 +417,7 @@ def score_law_candidates_reranker(
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
     """Compute cosine similarity between two dense vectors."""
-    dot = sum(x * y for x, y in zip(a, b))
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(y * y for y in b))
     if norm_a == 0.0 or norm_b == 0.0:
@@ -509,7 +510,7 @@ def build_law_embedding_index(
         )
 
     indexed: list[dict[str, Any]] = []
-    for i, (entry, emb) in enumerate(zip(catalog_entries, all_embeddings)):
+    for i, (entry, emb) in enumerate(zip(catalog_entries, all_embeddings, strict=True)):
         new_entry = dict(entry)
         new_entry["embedding"] = emb
         if title_embeddings is not None:
@@ -573,7 +574,7 @@ def score_all_laws_embedding(
     with the query (common in morphologically rich languages like Norwegian).
 
     Uses numpy for a vectorised matrix multiply when available (~10-50x faster
-    than the pure-Python cosine loop for 4427 × 1024-dim vectors).
+    than the pure-Python cosine loop for 4427 x 1024-dim vectors).
 
     A configurable ``direct_mention_bonus`` is added for laws whose normalised
     short name or title appears verbatim in the query, preserving the benefit of
@@ -635,7 +636,7 @@ def score_all_laws_embedding(
 
     # Build result list with direct-mention bonus and optional title blend
     scored: list[dict[str, Any]] = []
-    for i, (entry, summary_sim) in enumerate(zip(valid_entries, summary_sims)):
+    for i, (entry, summary_sim) in enumerate(zip(valid_entries, summary_sims, strict=True)):
         if title_sims is not None:
             sim = (1.0 - title_weight) * summary_sim + title_weight * title_sims[i]
             sim = max(0.0, min(1.0, sim))

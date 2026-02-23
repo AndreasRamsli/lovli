@@ -1,8 +1,7 @@
 """Tests for LegalIndexer sparse vector conversion."""
 
 import pytest
-import numpy as np
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 from lovli.indexer import LegalIndexer, _build_point_key, _generate_deterministic_id
 from lovli.parser import LegalArticle
 from lovli.config import Settings

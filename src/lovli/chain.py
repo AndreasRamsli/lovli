@@ -2,7 +2,8 @@
 
 import logging
 from pathlib import Path
-from typing import Dict, Any, Iterator, Tuple
+from typing import Any
+from collections.abc import Iterator
 from langchain_qdrant import QdrantVectorStore, RetrievalMode
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.documents import Document
@@ -35,8 +36,6 @@ from .routing import (
     score_law_candidates_lexical,
     score_law_candidates_reranker,
     compute_routing_alignment,
-    tokenize_for_routing as _tokenize_for_routing,
-    normalize_keyword_term as _normalize_keyword_term,
     normalize_law_mention as _normalize_law_mention,
 )
 from .reranking import (
@@ -61,7 +60,7 @@ GATED_RESPONSE = (
 NO_RESULTS_RESPONSE = "Beklager, jeg kunne ikke finne informasjon om dette spørsmålet."
 
 
-def _editorial_note_payload(doc: Document) -> Dict[str, Any]:
+def _editorial_note_payload(doc: Document) -> dict[str, Any]:
     """Normalize an editorial note document into a compact metadata payload."""
     metadata = doc.metadata if hasattr(doc, "metadata") else {}
     content = (doc.page_content if hasattr(doc, "page_content") else "") or ""
@@ -76,12 +75,12 @@ def _editorial_note_payload(doc: Document) -> Dict[str, Any]:
 
 
 def _normalize_editorial_notes(
-    notes: list[Dict[str, Any]],
+    notes: list[dict[str, Any]],
     max_notes: int,
     max_chars: int,
-) -> list[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Apply editorial note payload contract, dedupe, and deterministic ordering."""
-    normalized: list[Dict[str, Any]] = []
+    normalized: list[dict[str, Any]] = []
     for note in notes or []:
         article_id = (note.get("article_id") or "").strip()
         content = (note.get("content") or "").strip()
@@ -107,7 +106,7 @@ def _normalize_editorial_notes(
             (item.get("content") or ""),
         )
     )
-    deduped: list[Dict[str, Any]] = []
+    deduped: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for note in normalized:
         key = ((note.get("article_id") or "").strip(), (note.get("content") or "").strip())
@@ -367,7 +366,7 @@ Kontekst fra lovtekster:
             question = question[:MAX_QUESTION_LENGTH]
         return question
 
-    def _format_context(self, sources: list[Dict[str, Any]]) -> str:
+    def _format_context(self, sources: list[dict[str, Any]]) -> str:
         """Format retrieved sources with editorial notes attached to each provision."""
         if not sources:
             return ""
@@ -403,7 +402,7 @@ Kontekst fra lovtekster:
             return ""
         return "Lovgrunnlag:\n" + "\n\n".join(provision_blocks)
 
-    def _extract_sources(self, docs: list, include_content: bool = False) -> list[Dict[str, Any]]:
+    def _extract_sources(self, docs: list, include_content: bool = False) -> list[dict[str, Any]]:
         """Extract deduplicated source metadata from documents."""
         sources = []
         seen_ids = set()
@@ -637,7 +636,7 @@ Kontekst fra lovtekster:
         provisions: list = []
         provision_scores: list[float] = []
         if has_aligned_scores:
-            for doc, score in zip(docs, scores):
+            for doc, score in zip(docs, scores, strict=True):
                 metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
                 if _infer_doc_type(metadata) != "editorial_note":
                     provisions.append(doc)
@@ -665,8 +664,8 @@ Kontekst fra lovtekster:
         if has_inline_payload or not self.settings.editorial_v2_compat_mode:
             return provisions, provision_scores if has_aligned_scores else []
 
-        editorial_by_provision: Dict[tuple[str, str], list[Dict[str, Any]]] = {}
-        editorial_by_chapter: Dict[tuple[str, str], list[Dict[str, Any]]] = {}
+        editorial_by_provision: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        editorial_by_chapter: dict[tuple[str, str], list[dict[str, Any]]] = {}
 
         provision_pairs = collect_provision_article_pairs(provisions)
         editorial_docs = self._fetch_editorial_for_provisions(provision_pairs)
@@ -689,7 +688,7 @@ Kontekst fra lovtekster:
             elif law_id and chapter_id:
                 editorial_by_chapter.setdefault((law_id, chapter_id), []).append(note_payload)
 
-        chapter_to_provision_keys: Dict[tuple[str, str], list[tuple[str, str]]] = {}
+        chapter_to_provision_keys: dict[tuple[str, str], list[tuple[str, str]]] = {}
         for provision_doc in provisions:
             p_meta = provision_doc.metadata if hasattr(provision_doc, "metadata") else {}
             law_id = (p_meta.get("law_id") or "").strip()
@@ -731,7 +730,7 @@ Kontekst fra lovtekster:
             context_max_prefix_chars=self.settings.reranker_context_max_prefix_chars,
         )
 
-    def _rerank(self, query: str, docs: list, top_k: int | None = None) -> Tuple[list, list[float]]:
+    def _rerank(self, query: str, docs: list, top_k: int | None = None) -> tuple[list, list[float]]:
         """
         Rerank retrieved documents using cross-encoder reranker.
 
@@ -752,7 +751,7 @@ Kontekst fra lovtekster:
         )
 
     def _rewrite_query(
-        self, question: str, chat_history: list[Dict[str, str]] | None = None, max_retries: int = 1
+        self, question: str, chat_history: list[dict[str, str]] | None = None, max_retries: int = 1
     ) -> str:
         """
         Rewrite a follow-up question using chat history to make it standalone.
@@ -1133,7 +1132,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
                 ]
             )
 
-        # Section reference detected: each (law_id × article_prefix) pair forms one
+        # Section reference detected: each (law_id x article_prefix) pair forms one
         # AND clause; all clauses are OR-combined in the outer should list.
         # This means: "any article in law A that starts with prefix P1, OR
         #              any article in law A that starts with prefix P2, OR
@@ -1156,7 +1155,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
                     )
                 )
         logger.debug(
-            "_build_law_filter: article narrowing active — %d law(s) × %d prefix(es) = %d clauses",
+            "_build_law_filter: article narrowing active -- %d law(s) x %d prefix(es) = %d clauses",
             len(law_ids),
             len(article_id_prefixes),
             len(should_clauses),
@@ -1445,7 +1444,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             return docs, scores, scores
 
         candidates: list[dict[str, Any]] = []
-        for idx, (doc, score) in enumerate(zip(docs, scores)):
+        for idx, (doc, score) in enumerate(zip(docs, scores, strict=True)):
             metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
             candidates.append(
                 {
@@ -1506,8 +1505,8 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
         return fused_docs, fused_scores, ce_scores_for_gating
 
     def retrieve(
-        self, question: str, chat_history: list[Dict[str, str]] | None = None
-    ) -> Tuple[list[Dict[str, Any]], float | None, list[float]]:
+        self, question: str, chat_history: list[dict[str, str]] | None = None
+    ) -> tuple[list[dict[str, Any]], float | None, list[float]]:
         """
         Retrieve relevant legal documents for a question.
 
@@ -1607,7 +1606,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
     def stream_answer(
         self,
         question: str,
-        sources: list[Dict[str, Any]],
+        sources: list[dict[str, Any]],
         top_score: float | None = None,
         scores: list[float] | None = None,
     ) -> Iterator[str]:
@@ -1642,8 +1641,8 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
                 yield chunk.content
 
     def query(
-        self, question: str, chat_history: list[Dict[str, str]] | None = None
-    ) -> Dict[str, Any]:
+        self, question: str, chat_history: list[dict[str, str]] | None = None
+    ) -> dict[str, Any]:
         """
         Query the RAG chain with a legal question (non-streaming).
 

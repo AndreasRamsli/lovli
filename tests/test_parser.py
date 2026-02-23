@@ -9,7 +9,6 @@ from lovli.parser import (
     _extract_law_ref_from_filename,
     _extract_short_name,
     _extract_cross_references,
-    LegalArticle,
 )
 from bs4 import BeautifulSoup
 
@@ -35,7 +34,7 @@ class TestExtractLawRef:
 
 class TestExtractShortName:
     def test_with_separator(self):
-        html = '<dd class="titleShort">Husleieloven – husll</dd>'
+        html = '<dd class="titleShort">Husleieloven \u2013 husll</dd>'
         soup = BeautifulSoup(html, "html.parser")
         assert _extract_short_name(soup) == "Husleieloven"
 
@@ -533,7 +532,9 @@ class TestParseLawHeader:
         assert header["law_ref"] == "lov/1999-03-26-17"
 
 
-@pytest.mark.skipif(not FORBRUKERKJOP_PATH.exists(), reason="Forbrukerkjopsloven data file not available")
+@pytest.mark.skipif(
+    not FORBRUKERKJOP_PATH.exists(), reason="Forbrukerkjopsloven data file not available"
+)
 class TestParseForbrukerkjopsloven:
     """Integration tests with a second law to verify consistency."""
 

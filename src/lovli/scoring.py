@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import math
-import re
-from typing import Any, Dict
+from typing import Any
 
 
 def sigmoid(x: float) -> float:
@@ -153,7 +152,7 @@ def build_law_cross_reference_affinity(
             law_stats.sort(key=lambda item: (item[1], item[2]), reverse=True)
             dominant_law_id = law_stats[0][0] if law_stats else None
     if not dominant_law_id or dominant_law_id not in grouped:
-        return {law_id: 0.0 for law_id in grouped.keys()}
+        return dict.fromkeys(grouped.keys(), 0.0)
 
     candidate_law_ids = set(grouped.keys())
 
@@ -385,7 +384,7 @@ def build_law_coherence_decision(
         )
         required_keep = min_sources_floor - (len(candidates) - len(drop_indices))
         keep_back = set(sorted_drop_indices[:required_keep])
-        drop_indices = set(idx for idx in drop_indices if idx not in keep_back)
+        drop_indices = {idx for idx in drop_indices if idx not in keep_back}
 
     result.update(
         {
@@ -549,7 +548,7 @@ def apply_uncertainty_law_cap(
     return capped, diagnostics
 
 
-def _infer_doc_type(metadata: Dict[str, Any]) -> str:
+def _infer_doc_type(metadata: dict[str, Any]) -> str:
     """Infer doc type with backward-compatible fallbacks for legacy payloads."""
     doc_type = (metadata.get("doc_type") or "").strip().lower()
     if doc_type in {"provision", "editorial_note"}:

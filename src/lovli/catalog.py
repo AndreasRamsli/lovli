@@ -5,7 +5,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Iterator
+from collections.abc import Iterator
 
 from .parser import parse_law_header
 
@@ -71,7 +71,7 @@ def generate_summary(law_title: str, llm) -> str:
 
     try:
         response = llm.invoke(prompt)
-        content = response.content if hasattr(response, 'content') else str(response)
+        content = response.content if hasattr(response, "content") else str(response)
         return content.strip()
     except Exception as e:
         logger.warning(f"Failed to generate summary for '{law_title}': {e}")
@@ -108,7 +108,7 @@ async def _generate_summary_async(
             )
             content = response.content if hasattr(response, "content") else str(response)
             summary = content.strip()
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(f"[{idx + 1}] Timeout after {_REQUEST_TIMEOUT}s for: {law_title}")
             summary = ""
         except Exception as e:
@@ -123,7 +123,9 @@ async def _generate_summary_async(
         elapsed = time.time() - progress["start_time"]
         rate = done / elapsed if elapsed > 0 else 0
         eta = (total - done) / rate if rate > 0 else 0
-        logger.info(f"  Progress: {done}/{total} ({done * 100 // total}%) - {rate:.1f}/s - ETA {eta:.0f}s")
+        logger.info(
+            f"  Progress: {done}/{total} ({done * 100 // total}%) - {rate:.1f}/s - ETA {eta:.0f}s"
+        )
 
     return summary
 
@@ -147,7 +149,9 @@ async def _generate_summaries_batch(
     semaphore = asyncio.Semaphore(concurrency)
     total = len(catalog)
     progress = {"done": 0, "total": total, "start_time": time.time()}
-    logger.info(f"Generating summaries for {total} entries (concurrency={concurrency}, timeout={_REQUEST_TIMEOUT}s)")
+    logger.info(
+        f"Generating summaries for {total} entries (concurrency={concurrency}, timeout={_REQUEST_TIMEOUT}s)"
+    )
 
     tasks = [
         _generate_summary_async(idx, entry["law_title"], llm, semaphore, progress)
@@ -156,7 +160,7 @@ async def _generate_summaries_batch(
 
     summaries = await asyncio.gather(*tasks)
 
-    for entry, summary in zip(catalog, summaries):
+    for entry, summary in zip(catalog, summaries, strict=True):
         entry["summary"] = summary
 
     succeeded = sum(1 for s in summaries if s)
@@ -269,7 +273,7 @@ def backfill_summaries(
     asyncio.run(_generate_summaries_batch(missing_entries, llm, concurrency))
 
     # Write back to the same file
-    for idx, entry in zip(missing, missing_entries):
+    for idx, entry in zip(missing, missing_entries, strict=True):
         catalog[idx]["summary"] = entry["summary"]
 
     _write_catalog(catalog, catalog_path)
@@ -301,5 +305,5 @@ def load_catalog(catalog_path: Path) -> list[dict]:
     if not catalog_path.exists():
         raise FileNotFoundError(f"Catalog not found: {catalog_path}")
 
-    with open(catalog_path, "r", encoding="utf-8") as f:
+    with open(catalog_path, encoding="utf-8") as f:
         return json.load(f)

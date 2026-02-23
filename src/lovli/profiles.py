@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any
 
 
 TRUST_PROFILES: dict[str, dict[str, Any]] = {
@@ -33,7 +33,7 @@ TRUST_PROFILES: dict[str, dict[str, Any]] = {
         #   has 93.75% observed precision; the old ceiling was incorrectly treating
         #   high-precision retrievals as ambiguous, driving fp_gate=0.300.
         # Fix 2: min_gap raised 0.05→0.12 — adjacent articles within the same
-        #   chapter score with gaps of 0.00–0.02; the wider gap forces decisiveness
+        #   chapter score with gaps of 0.00-0.02; the wider gap forces decisiveness
         #   and reduces boundary_level_b wrong-article-same-law mismatches (60.8%).
         # Fix 3: min_doc_score raised 0.32→0.42 — the [0.4,0.6] calibration bin
         #   has only 25% observed precision; raising the floor cuts that FP bucket.
@@ -101,10 +101,10 @@ def apply_trust_profile(settings: Any, profile_name: str) -> str:
 
 
 def extract_chat_history(
-    messages: list[Dict[str, Any]],
+    messages: list[dict[str, Any]],
     window_size: int = 6,
     exclude_current: bool = True,
-) -> list[Dict[str, str]]:
+) -> list[dict[str, str]]:
     """
     Extract chat history for query rewriting.
 

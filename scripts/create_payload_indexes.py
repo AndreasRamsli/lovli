@@ -13,7 +13,7 @@ ROOT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT_DIR / "src"))
 load_dotenv(ROOT_DIR / ".env")
 
-from lovli.indexer import LegalIndexer  # noqa: E402
+from lovli.indexer import LegalIndexer
 
 logging.basicConfig(
     level=logging.INFO,
