@@ -147,10 +147,10 @@ def _precompute_cache_key(
     reranker_model: str = "",
     law_routing_reranker_enabled: bool = False,
     law_routing_embedding_enabled: bool = False,
-    law_routing_embedding_weight: float = 0.7,
     law_routing_embedding_text_field: str = "routing_summary_text",
     law_routing_prefilter_k: int = 160,
     law_routing_score_window: float = 0.15,
+    law_routing_direct_mention_bonus: float = 0.15,
 ) -> str:
     """Deterministic cache key for precomputed candidates. Invalidation on any input change.
 
@@ -161,9 +161,10 @@ def _precompute_cache_key(
         f"{questions_sha256}|{git_commit}|{qdrant_collection}|{max_k_initial}|"
         f"{fallback_unfiltered}|{reranker_ctx_enabled}|{dualpass_enabled}|"
         f"{reranker_model}|{law_routing_reranker_enabled}|"
-        f"{law_routing_embedding_enabled}|{law_routing_embedding_weight}|"
+        f"{law_routing_embedding_enabled}|"
         f"{law_routing_embedding_text_field}|"
-        f"{law_routing_prefilter_k}|{law_routing_score_window}"
+        f"{law_routing_prefilter_k}|{law_routing_score_window}|"
+        f"{law_routing_direct_mention_bonus}"
     )
     return hashlib.sha256(blob.encode()).hexdigest()[:24]
 
@@ -1074,8 +1075,7 @@ def apply_combo_to_chain(
     chain.settings.law_routing_fallback_unfiltered = routing_fallback_unfiltered
     chain.settings.reranker_context_enrichment_enabled = reranker_context_enrichment
     chain.settings.law_routing_summary_dualpass_enabled = routing_summary_dualpass
-    if hasattr(chain.settings, "law_routing_direct_mention_bonus"):
-        chain.settings.law_routing_direct_mention_bonus = direct_mention_bonus
+    chain.settings.law_routing_direct_mention_bonus = direct_mention_bonus
     chain.settings.law_rank_fusion_weight_doc_score = rank_fusion_doc_weight
 
 
@@ -1316,14 +1316,14 @@ def main() -> None:
             law_routing_embedding_enabled=bool(
                 getattr(settings, "law_routing_embedding_enabled", False)
             ),
-            law_routing_embedding_weight=float(
-                getattr(settings, "law_routing_embedding_weight", 0.7)
-            ),
             law_routing_embedding_text_field=str(
                 getattr(settings, "law_routing_embedding_text_field", "routing_summary_text")
             ),
             law_routing_prefilter_k=int(getattr(settings, "law_routing_prefilter_k", 160)),
             law_routing_score_window=float(getattr(settings, "law_routing_score_window", 0.15)),
+            law_routing_direct_mention_bonus=float(
+                getattr(settings, "law_routing_direct_mention_bonus", 0.15)
+            ),
         )
         cache_path = None
         if cache_dir:

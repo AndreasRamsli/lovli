@@ -61,7 +61,6 @@ def mock_settings():
     settings.law_routing_dualpass_fulltext_weight = 0.20
     settings.law_routing_reranker_enabled = False
     settings.law_routing_embedding_enabled = False
-    settings.law_routing_embedding_weight = 0.7
     settings.law_routing_embedding_text_field = "routing_summary_text"
     return settings
 
@@ -407,31 +406,6 @@ def test_extract_sources_includes_doc_type(mock_settings):
         assert sources[0]["doc_type"] == "provision"
 
 
-def test_prioritize_doc_types_adaptive_budget(mock_settings):
-    """Prioritization is a pass-through for attached-editorial model."""
-    with (
-        patch("lovli.chain.QdrantVectorStore"),
-        patch("lovli.chain.HuggingFaceEmbeddings"),
-        patch("lovli.chain.ChatOpenAI"),
-        patch("lovli.chain.QdrantClient"),
-    ):
-        chain = LegalRAGChain(mock_settings)
-        docs = [
-            Mock(metadata={"article_id": "art-1", "doc_type": "provision"}),
-            Mock(metadata={"article_id": "art-2", "doc_type": "editorial_note"}),
-            Mock(metadata={"article_id": "art-3", "doc_type": "editorial_note"}),
-            Mock(metadata={"article_id": "art-4", "doc_type": "editorial_note"}),
-        ]
-        scores = [0.9, 0.8, 0.7, 0.6]
-        selected_docs, selected_scores = chain._prioritize_doc_types(
-            docs,
-            scores,
-            retrieval_query="Hva er reglene for oppsigelse?",
-        )
-        assert len(selected_docs) == 4
-        assert selected_scores == scores
-
-
 def test_format_context_renders_inline_editorial_notes(mock_settings):
     """Context formatter should render editorial notes inline per provision."""
     with (
@@ -533,29 +507,6 @@ def test_attach_editorial_to_provisions_keeps_score_alignment(mock_settings):
         )
         assert len(attached) == 1
         assert scores == [0.91]
-
-
-def test_prioritize_doc_types_no_editorial_edge_case(mock_settings):
-    """Prioritization returns empty scores when score/doc lengths mismatch."""
-    with (
-        patch("lovli.chain.QdrantVectorStore"),
-        patch("lovli.chain.HuggingFaceEmbeddings"),
-        patch("lovli.chain.ChatOpenAI"),
-        patch("lovli.chain.QdrantClient"),
-    ):
-        chain = LegalRAGChain(mock_settings)
-        docs = [
-            Mock(metadata={"article_id": "p-1", "doc_type": "provision"}),
-            Mock(metadata={"article_id": "p-2", "doc_type": "provision"}),
-        ]
-        scores = [0.92, 0.9]
-        selected_docs, selected_scores = chain._prioritize_doc_types(
-            docs,
-            [],
-            retrieval_query="Hva står i § 9-6?",
-        )
-        assert [d.metadata["article_id"] for d in selected_docs] == ["p-1", "p-2"]
-        assert selected_scores == []
 
 
 def test_fetch_editorial_for_chapters_fallback_on_filter_error(mock_settings):
@@ -1003,18 +954,18 @@ def test_score_all_laws_embedding_title_blend():
             "embedding": [1.0, 0.0, 0.0, 0.0],
             "title_embedding": [0.0, 1.0, 0.0, 0.0],
             "law_title": "Lov A",
-            "short_name": "",
+            "short_name_normalized": "",
+            "law_title_normalized": "lov a",
             "routing_tokens": set(),
-            "direct_mention_terms": [],
         },
         {
             "law_id": "LOV-B",
             "embedding": [0.0, 1.0, 0.0, 0.0],
             "title_embedding": [1.0, 0.0, 0.0, 0.0],
             "law_title": "Lov B",
-            "short_name": "",
+            "short_name_normalized": "",
+            "law_title_normalized": "lov b",
             "routing_tokens": set(),
-            "direct_mention_terms": [],
         },
     ]
     result = score_all_laws_embedding(

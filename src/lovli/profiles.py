@@ -37,7 +37,7 @@ TRUST_PROFILES: dict[str, dict[str, Any]] = {
         #   and reduces boundary_level_b wrong-article-same-law mismatches (60.8%).
         # Fix 3: min_doc_score raised 0.32→0.42 — the [0.4,0.6] calibration bin
         #   has only 25% observed precision; raising the floor cuts that FP bucket.
-        # Fix 5: dualpass enabled — reduces 65% routing uncertainty by giving the
+        # Fix 4: dualpass enabled — reduces 65% routing uncertainty by giving the
         #   router a second pass over summary text for queries missing the first pass.
         "trust_profile_name": "balanced_v2",
         "trust_profile_version": "2026-02-23",

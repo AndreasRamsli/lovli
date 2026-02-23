@@ -31,15 +31,18 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Match patterns like "§ 3-5", "§ 1-1", "§§ 1-1 og 1-2", "§ 3-5a"
+# Note: letter suffix uses [a-zA-Z]? WITHOUT a preceding \s* so "§ 3-5 i loven"
+# captures paragraph "5", not "5 i".  Article letter suffixes like "5a" are
+# attached without whitespace in Norwegian law IDs.
 _QUERY_SECTION_DASH_RE = re.compile(
-    r"§§?\s*(\d+\s*[a-zA-Z]?)\s*-\s*(\d+\s*[a-zA-Z]?)",
+    r"§§?\s*(\d+[a-zA-Z]?)\s*-\s*(\d+[a-zA-Z]?)",
 )
 
 # Match patterns like "kapittel 2 § 1", "kapittel 1 kapittel 1 § 3"
 _QUERY_SECTION_KAP_RE = re.compile(
     r"kapittel\s+(\d+[a-zA-Z]?)"
     r"(?:\s+kapittel\s+(\d+[a-zA-Z]?))?"
-    r"\s+§§?\s*(\d+\s*[a-zA-Z]?)",
+    r"\s+§§?\s*(\d+[a-zA-Z]?)",
     re.IGNORECASE,
 )
 
@@ -62,8 +65,10 @@ def extract_section_article_ids(query: str) -> list[str]:
 
     article_ids: list[str] = []
 
-    # Pattern 2 first (more specific, to avoid partial § X-Y matches inside it)
-    for m in _QUERY_SECTION_KAP_RE.finditer(query):
+    # Pattern 2 first (more specific, to avoid partial § X-Y matches inside it).
+    # Collect matches and their spans in a single pass so we do not run the regex twice.
+    kap_matches = list(_QUERY_SECTION_KAP_RE.finditer(query))
+    for m in kap_matches:
         kap1 = m.group(1).strip()
         kap2 = (m.group(2) or "").strip()
         sec = m.group(3).strip()
@@ -73,9 +78,8 @@ def extract_section_article_ids(query: str) -> list[str]:
             aid = f"kapittel-{kap1}-paragraf-{sec}"
         article_ids.append(aid)
 
-    # Pattern 1: § X-Y (skip matches already consumed by pattern 2)
-    # Build set of positions consumed by pattern 2
-    kap_spans = {(m.start(), m.end()) for m in _QUERY_SECTION_KAP_RE.finditer(query)}
+    # Pattern 1: § X-Y (skip matches already consumed by pattern 2).
+    kap_spans = {(m.start(), m.end()) for m in kap_matches}
     for m in _QUERY_SECTION_DASH_RE.finditer(query):
         # Check if this match overlaps with a kap match
         overlaps = any(ks <= m.start() < ke or ks < m.end() <= ke for ks, ke in kap_spans)

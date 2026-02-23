@@ -197,20 +197,10 @@ class Settings(BaseSettings):
             "Blended with lexical token-overlap using law_routing_embedding_weight."
         ),
     )
-    law_routing_embedding_weight: float = Field(
-        default=0.7,
-        ge=0.0,
-        le=1.0,
-        description=(
-            "Blend weight for embedding cosine similarity in hybrid law routing. "
-            "Final score = embedding_sim * weight + normalized_lexical * (1 - weight). "
-            "Higher values favour semantic similarity; lower values favour keyword overlap."
-        ),
-    )
     law_routing_embedding_text_field: str = Field(
         default="routing_summary_text",
         description=(
-            "Which routing text field to embed for law-level similarity scoring. "
+            "Which routing text field to embed for law-level ANN similarity scoring. "
             "Options: 'routing_text' (full), 'routing_summary_text' (summary+area+chapters), "
             "'routing_title_text' (title+short_name+ref). "
             "routing_summary_text is recommended: focused, avoids noisy keywords."
@@ -278,19 +268,32 @@ class Settings(BaseSettings):
         default=0.45,
         ge=0.0,
         le=1.0,
-        description="Blend weight for summary-specific law reranker score in dual-pass mode.",
+        description=(
+            "Blend weight for summary-specific law reranker score in cross-encoder dual-pass mode. "
+            "Only active when law_routing_reranker_enabled=True (off by default). "
+            "For ANN dual-pass routing use law_routing_dualpass_title_weight instead."
+        ),
     )
     law_routing_dualpass_title_weight: float = Field(
         default=0.35,
         ge=0.0,
         le=1.0,
-        description="Blend weight for title/name law reranker score in dual-pass mode.",
+        description=(
+            "Blend weight for title/name cosine similarity in ANN dual-pass routing. "
+            "Active when law_routing_embedding_enabled=True and "
+            "law_routing_summary_dualpass_enabled=True (the balanced_v2 default). "
+            "blended_sim = (1 - title_weight) * summary_sim + title_weight * title_sim."
+        ),
     )
     law_routing_dualpass_fulltext_weight: float = Field(
         default=0.20,
         ge=0.0,
         le=1.0,
-        description="Blend weight for full routing-text law reranker score in dual-pass mode.",
+        description=(
+            "Blend weight for full routing-text law reranker score in cross-encoder dual-pass mode. "
+            "Only active when law_routing_reranker_enabled=True (off by default). "
+            "For ANN dual-pass routing use law_routing_dualpass_title_weight instead."
+        ),
     )
     law_routing_min_confidence: float = Field(
         default=0.30,

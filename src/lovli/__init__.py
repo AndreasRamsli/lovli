@@ -30,6 +30,9 @@ from .routing import (
     tokenize_for_routing,
     normalize_keyword_term,
     normalize_law_mention,
+    extract_section_article_ids,
+    build_law_embedding_index,
+    score_all_laws_embedding,
 )
 
 # Reranking utilities
@@ -80,6 +83,9 @@ __all__ = [
     "tokenize_for_routing",
     "normalize_keyword_term",
     "normalize_law_mention",
+    "extract_section_article_ids",
+    "build_law_embedding_index",
+    "score_all_laws_embedding",
     # reranking
     "build_reranker_document_text",
     "rerank_documents",

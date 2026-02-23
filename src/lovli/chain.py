@@ -263,7 +263,7 @@ Kontekst fra lovtekster:
         if self.settings.law_routing_enabled:
             try:
                 self._law_catalog = load_catalog(Path(self.settings.law_catalog_path))
-                self._law_catalog_entries = self._build_routing_entries(self._law_catalog)
+                self._law_catalog_entries = build_routing_entries(self._law_catalog)
                 self._law_ref_to_id = {
                     normalize_law_ref(item.get("law_ref") or ""): (item.get("law_id") or "").strip()
                     for item in self._law_catalog
@@ -310,10 +310,6 @@ Kontekst fra lovtekster:
                     "Falling back to unfiltered retrieval.",
                     e,
                 )
-
-    def _build_routing_entries(self, catalog: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Precompute routing text/tokens for fast hybrid law routing."""
-        return build_routing_entries(catalog)
 
     def _score_law_candidates_lexical(self, query: str) -> list[dict[str, Any]]:
         """Score catalog entries lexically before optional reranker-based law scoring."""
@@ -727,16 +723,6 @@ Kontekst fra lovtekster:
             )
         return provisions, provision_scores if has_aligned_scores else []
 
-    def _prioritize_doc_types(
-        self, docs: list, scores: list[float], retrieval_query: str
-    ) -> tuple[list, list[float]]:
-        """Keep provisions only; editorial context is attached within provision metadata."""
-        if not docs:
-            return docs, scores
-        if scores and len(scores) == len(docs):
-            return docs, scores
-        return docs, []
-
     def _build_reranker_document_text(self, doc: Any) -> str:
         """Build reranker text with optional metadata prefix for better disambiguation."""
         return _build_reranker_document_text_fn(
@@ -950,13 +936,12 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             if top_score is not None:
                 if second_score is not None:
                     score_gap = top_score - second_score
-                # Determine score_mode independently of whether second_score exists
+                # Determine score_mode: embedding_hybrid when ANN path was used,
+                # otherwise cross-encoder reranker (reranker_enabled + embedding_disabled).
                 if self.settings.law_routing_embedding_enabled and any(
                     c.get("embedding") is not None for c in scored_candidates[:5]
                 ):
                     score_mode = "embedding_hybrid"
-                elif self.settings.law_routing_summary_dualpass_enabled:
-                    score_mode = "reranker_dualpass"
                 else:
                     score_mode = "reranker"
 
@@ -1585,7 +1570,6 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             docs, fused_scores, gate_scores = self._apply_law_aware_rank_fusion(docs, scores)
             docs, _ = self._attach_editorial_to_provisions(docs, scores=fused_scores)
             scores = gate_scores
-            docs, scores = self._prioritize_doc_types(docs, scores, retrieval_query=retrieval_query)
             # Confidence gating stays calibrated on CE reranker scores, not fused scores.
             top_score = scores[0] if scores else None
             if top_score is not None:
@@ -1594,7 +1578,6 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
                 logger.debug(f"Reranking returned no scores for {len(docs)} documents")
         elif docs:
             docs, scores = self._attach_editorial_to_provisions(docs, scores=scores)
-            docs, scores = self._prioritize_doc_types(docs, scores, retrieval_query=retrieval_query)
 
         sources = self._extract_sources(docs, include_content=True)
         return sources, top_score, scores
