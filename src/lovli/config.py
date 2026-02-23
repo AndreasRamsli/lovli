@@ -96,7 +96,7 @@ class Settings(BaseSettings):
         description="Named trust profile for retrieval/routing/gating defaults (e.g. balanced_v1, strict_v1).",
     )
     trust_profile_version: str = Field(
-        default="2026-02-16",
+        default="2026-02-23",
         description="Version tag for the active trust profile.",
     )
 

@@ -577,6 +577,51 @@ Kontekst fra lovtekster:
 
         return dedupe_by_law_article(editorial_docs)
 
+    def _strip_standalone_editorial(
+        self, docs: list, scores: list[float]
+    ) -> tuple[list, list[float]]:
+        """Remove editorial_note docs from the ranked list before gating/scoring.
+
+        Editorial notes are injected into the reranker candidate pool by
+        ``reranker_context_enrichment_enabled`` to improve article discrimination,
+        but they must not occupy top-k output slots as standalone citations.
+        ``_attach_editorial_to_provisions`` already fetches and attaches them as
+        inline metadata on their parent provision — having them appear as separate
+        ranked items produces spurious citations and collapses
+        ``non_editorial_clean`` success.
+
+        A minimum of ``reranker_min_sources`` provision docs is always preserved
+        even when all candidates are editorial (degenerate case).
+        """
+        if not docs:
+            return docs, scores
+
+        has_aligned_scores = bool(scores) and len(scores) == len(docs)
+        provisions: list = []
+        provision_scores: list[float] = []
+        for i, doc in enumerate(docs):
+            metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+            if _infer_doc_type(metadata) != "editorial_note":
+                provisions.append(doc)
+                if has_aligned_scores:
+                    provision_scores.append(scores[i])
+
+        if not provisions:
+            # Degenerate: keep original list rather than return empty results
+            logger.debug(
+                "_strip_standalone_editorial: all %d docs were editorial_note — keeping originals",
+                len(docs),
+            )
+            return docs, scores
+
+        dropped = len(docs) - len(provisions)
+        if dropped > 0:
+            logger.debug(
+                "_strip_standalone_editorial: removed %d standalone editorial_note docs from top-k",
+                dropped,
+            )
+        return provisions, provision_scores if has_aligned_scores else []
+
     def _attach_editorial_to_provisions(
         self, docs: list, scores: list[float] | None = None
     ) -> tuple[list, list[float]]:
@@ -1443,6 +1488,11 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
         # Rerank if enabled
         if self.reranker and docs:
             docs, scores = self._rerank(retrieval_query, docs, top_k=self.settings.retrieval_k)
+            # Strip editorial_note docs before gating/scoring. They are injected
+            # by reranker_context_enrichment to improve article discrimination but
+            # must not occupy standalone top-k output slots; they are attached to
+            # provisions as inline metadata by _attach_editorial_to_provisions().
+            docs, scores = self._strip_standalone_editorial(docs, scores)
             docs, scores = self._apply_reranker_doc_filter(docs, scores)
             if self.settings.law_coherence_filter_enabled:
                 docs, scores = self._filter_by_law_coherence(docs, scores)

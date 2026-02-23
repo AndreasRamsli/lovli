@@ -1,6 +1,6 @@
 {
   "baseline_id": "production_trust_baseline_v1",
-  "profile_version": "2026-02-17",
+  "profile_version": "2026-02-23",
   "description": "Must-pass trust gates for production hardening using effective post-fallback miss semantics. Values are conservative floors/ceilings anchored to validated Colab runs.",
   "gates": [
     {
@@ -127,5 +127,40 @@
       "operator": "<=",
       "value": 0.18
     }
-  ]
+  ],
+  "gates_v2_balanced_v2": {
+    "_comment": "Target gates for the balanced_v2 profile. Anchored to the failure modes identified in run colab_20260223T150809Z: fp_gate=0.300 (all tiers), citation_precision=0.311 (fails v2+), non_editorial_clean=0.111. These thresholds reflect expected improvements from Fix 1-5: raised top_ceiling (0.70→0.80), tighter min_gap (0.05→0.12), raised min_doc_score (0.32→0.42), editorial strip, and dualpass routing.",
+    "gates": [
+      {
+        "metric": "sweep.top.citation_precision",
+        "operator": ">=",
+        "value": 0.35,
+        "_rationale": "Raising min_doc_score to 0.42 removes the 75%-FP [0.4,0.6] bin; raising min_gap to 0.12 reduces boundary-level-B same-law wrong-article FPs. Combined target: >=0.35."
+      },
+      {
+        "metric": "sweep.top.unexpected_citation_rate",
+        "operator": "<=",
+        "value": 0.60,
+        "_rationale": "Complement of precision improvement. Editorial strip removes spurious editorial citations from non_editorial questions."
+      },
+      {
+        "metric": "sweep.top.false_positive_gating_rate",
+        "operator": "<=",
+        "value": 0.15,
+        "_rationale": "Raising top_ceiling to 0.80 stops the gate firing on the high-precision [0.6,0.8] bin. Was 0.300; target <=0.15."
+      },
+      {
+        "metric": "sweep.top.recall_at_k",
+        "operator": ">=",
+        "value": 0.78,
+        "_rationale": "Slightly relaxed vs gates_v3 (0.80) to account for stricter min_gap potentially withholding a borderline recall hit."
+      },
+      {
+        "metric": "sweep.top.non_editorial_clean_success",
+        "operator": ">=",
+        "value": 0.80,
+        "_rationale": "Directly targets the non_editorial_clean=0.111 regression introduced by reranker_ctx=True. Editorial strip should restore this to near 1.0."
+      }
+    ]
+  }
 }

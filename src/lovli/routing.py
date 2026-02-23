@@ -27,6 +27,76 @@ from .scoring import normalize_sigmoid_scores
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Query-time section reference extraction
+# ---------------------------------------------------------------------------
+
+# Match patterns like "§ 3-5", "§ 1-1", "§§ 1-1 og 1-2", "§ 3-5a"
+_QUERY_SECTION_DASH_RE = re.compile(
+    r"§§?\s*(\d+\s*[a-zA-Z]?)\s*-\s*(\d+\s*[a-zA-Z]?)",
+)
+
+# Match patterns like "kapittel 2 § 1", "kapittel 1 kapittel 1 § 3"
+_QUERY_SECTION_KAP_RE = re.compile(
+    r"kapittel\s+(\d+[a-zA-Z]?)"
+    r"(?:\s+kapittel\s+(\d+[a-zA-Z]?))?"
+    r"\s+§§?\s*(\d+\s*[a-zA-Z]?)",
+    re.IGNORECASE,
+)
+
+
+def extract_section_article_ids(query: str) -> list[str]:
+    """Extract article_id prefixes from section references in a query.
+
+    Converts query-time patterns like "§ 3-5" to Qdrant-compatible
+    ``article_id`` prefixes like "kapittel-3-paragraf-5".
+
+    Handles two patterns:
+      1. ``§ X-Y`` → ``kapittel-X-paragraf-Y``
+      2. ``kapittel X [kapittel Y] § Z`` → ``kapittel-X[-kapittel-Y]-paragraf-Z``
+
+    Returns:
+        List of unique article_id prefix strings (may be empty).
+    """
+    if not query:
+        return []
+
+    article_ids: list[str] = []
+
+    # Pattern 2 first (more specific, to avoid partial § X-Y matches inside it)
+    for m in _QUERY_SECTION_KAP_RE.finditer(query):
+        kap1 = m.group(1).strip()
+        kap2 = (m.group(2) or "").strip()
+        sec = m.group(3).strip()
+        if kap2:
+            aid = f"kapittel-{kap1}-kapittel-{kap2}-paragraf-{sec}"
+        else:
+            aid = f"kapittel-{kap1}-paragraf-{sec}"
+        article_ids.append(aid)
+
+    # Pattern 1: § X-Y (skip matches already consumed by pattern 2)
+    # Build set of positions consumed by pattern 2
+    kap_spans = {(m.start(), m.end()) for m in _QUERY_SECTION_KAP_RE.finditer(query)}
+    for m in _QUERY_SECTION_DASH_RE.finditer(query):
+        # Check if this match overlaps with a kap match
+        overlaps = any(ks <= m.start() < ke or ks < m.end() <= ke for ks, ke in kap_spans)
+        if overlaps:
+            continue
+        chapter = m.group(1).strip()
+        paragraph = m.group(2).strip()
+        aid = f"kapittel-{chapter}-paragraf-{paragraph}"
+        article_ids.append(aid)
+
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for aid in article_ids:
+        if aid not in seen:
+            seen.add(aid)
+            unique.append(aid)
+    return unique
+
+
+# ---------------------------------------------------------------------------
 # Token helpers
 # ---------------------------------------------------------------------------
 

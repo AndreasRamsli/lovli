@@ -5,7 +5,7 @@ import pytest
 from unittest.mock import Mock, MagicMock, patch
 from lovli.chain import LegalRAGChain
 from lovli.config import Settings
-from lovli.routing import score_law_candidates_embedding, build_law_embedding_index
+from lovli.routing import score_all_laws_embedding, build_law_embedding_index
 
 
 @pytest.fixture
@@ -279,45 +279,57 @@ def _make_unit_vec(dim: int, hot: int) -> list[float]:
     return v
 
 
-def test_score_law_candidates_embedding_ranks_by_cosine():
+def test_score_all_laws_embedding_ranks_by_cosine():
     """Candidates closer to query embedding should rank higher."""
     dim = 4
-    candidates = [
-        {"law_id": "law-a", "lexical_score": 1, "embedding": _make_unit_vec(dim, 0)},
-        {"law_id": "law-b", "lexical_score": 1, "embedding": _make_unit_vec(dim, 1)},
-        {"law_id": "law-c", "lexical_score": 1, "embedding": _make_unit_vec(dim, 2)},
+    catalog = [
+        {"law_id": "law-a", "embedding": _make_unit_vec(dim, 0)},
+        {"law_id": "law-b", "embedding": _make_unit_vec(dim, 1)},
+        {"law_id": "law-c", "embedding": _make_unit_vec(dim, 2)},
     ]
     # Query points toward law-b (dimension 1)
     query_emb = _make_unit_vec(dim, 1)
-    result = score_law_candidates_embedding(query_emb, candidates, embedding_weight=1.0)
+    result = score_all_laws_embedding(query_emb, catalog, direct_mention_bonus=0.0)
     assert result[0]["law_id"] == "law-b"
     assert result[0]["law_reranker_score"] > result[1]["law_reranker_score"]
 
 
-def test_score_law_candidates_embedding_lexical_boost():
-    """Higher lexical score should break ties when embeddings are equally similar."""
+def test_score_all_laws_embedding_direct_mention_boost():
+    """Direct mention bonus must elevate a law above a closer-embedding competitor."""
     dim = 4
-    # Both candidates are equidistant from query (same cosine)
     q = [1.0, 0.0, 0.0, 0.0]
-    candidates = [
-        {"law_id": "lex-low", "lexical_score": 1, "embedding": q[:]},
-        {"law_id": "lex-high", "lexical_score": 5, "embedding": q[:]},
+    catalog = [
+        # no-bonus: same direction as query but no mention
+        {"law_id": "no-bonus", "embedding": q[:], "law_short_name": "Other"},
+        # bonus: slightly off-axis but law name appears in query
+        {
+            "law_id": "with-bonus",
+            "embedding": _make_unit_vec(dim, 1),
+            "law_short_name": "husleieloven",
+            "short_name_normalized": "husleieloven",
+        },
     ]
-    result = score_law_candidates_embedding(q, candidates, embedding_weight=0.7)
-    # lex-high has higher normalised lexical score → should rank first
-    assert result[0]["law_id"] == "lex-high"
+    result = score_all_laws_embedding(
+        q,
+        catalog,
+        direct_mention_bonus=0.20,
+        query_norm="husleieloven",
+    )
+    with_bonus = next(r for r in result if r["law_id"] == "with-bonus")
+    assert with_bonus["direct_mention"] is True
 
 
-def test_score_law_candidates_embedding_no_embedding_falls_back():
-    """Candidates without embedding key should still get a score from lexical alone."""
+def test_score_all_laws_embedding_no_embedding_excluded():
+    """Entries without an embedding key must be excluded from results."""
     q = [1.0, 0.0]
-    candidates = [
-        {"law_id": "no-emb", "lexical_score": 3},
-        {"law_id": "has-emb", "lexical_score": 1, "embedding": [1.0, 0.0]},
+    catalog = [
+        {"law_id": "no-emb"},
+        {"law_id": "has-emb", "embedding": [1.0, 0.0]},
     ]
-    result = score_law_candidates_embedding(q, candidates, embedding_weight=0.7)
-    # Both should have a law_reranker_score
-    assert all(c.get("law_reranker_score") is not None for c in result)
+    result = score_all_laws_embedding(q, catalog, direct_mention_bonus=0.0)
+    # Only the entry with an embedding should appear
+    assert len(result) == 1
+    assert result[0]["law_id"] == "has-emb"
 
 
 def test_build_law_embedding_index_attaches_embeddings():
@@ -336,9 +348,9 @@ def test_build_law_embedding_index_attaches_embeddings():
     assert len(indexed[0]["embedding"]) == 4
 
 
-def test_score_law_candidates_embedding_empty():
-    """Empty candidates list should return empty list without error."""
-    result = score_law_candidates_embedding([1.0, 0.0], [], embedding_weight=0.7)
+def test_score_all_laws_embedding_empty():
+    """Empty catalog list should return empty list without error."""
+    result = score_all_laws_embedding([1.0, 0.0], [])
     assert result == []
 
 
@@ -605,8 +617,10 @@ def test_retrieve_attaches_editorial_notes_before_extracting_sources(mock_settin
                 "law_id": "nl-19990326-017",
                 "chapter_id": "kapittel-9",
                 "article_id": "nl-19990326-017_kapittel-9_art_6",
+                "linked_provision_id": "kapittel-9-paragraf-6",
                 "doc_type": "editorial_note",
-            }
+            },
+            page_content="Endret ved lov 2010-06-25 nr. 29.",
         )
         chain._fetch_editorial_for_provisions = MagicMock(return_value=[editorial_doc])
         chain._extract_sources = MagicMock(return_value=[])
@@ -690,3 +704,176 @@ def test_attach_editorial_skips_v2_fetch_when_compat_disabled(mock_settings):
         assert attached[0].metadata.get("editorial_notes") == []
         assert not chain._fetch_editorial_for_provisions.called
         assert not chain._fetch_editorial_for_chapters.called
+
+
+# ---------------------------------------------------------------------------
+# _strip_standalone_editorial tests (Fix 4)
+# ---------------------------------------------------------------------------
+
+
+def _make_doc(doc_type: str, article_id: str = "art-1") -> Mock:
+    """Helper: create a Mock document with given doc_type in metadata."""
+    return Mock(
+        metadata={"doc_type": doc_type, "article_id": article_id},
+        page_content=f"content for {article_id}",
+    )
+
+
+def test_strip_standalone_editorial_removes_editorial_docs(mock_settings):
+    """Editorial note docs must be removed from the ranked list."""
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
+        chain = LegalRAGChain(mock_settings)
+        provision = _make_doc("provision", "art-1")
+        editorial = _make_doc("editorial_note", "art-2")
+        docs = [provision, editorial]
+        scores = [0.85, 0.72]
+
+        stripped_docs, stripped_scores = chain._strip_standalone_editorial(docs, scores)
+
+        assert len(stripped_docs) == 1
+        assert stripped_docs[0] is provision
+        assert stripped_scores == [0.85]
+
+
+def test_strip_standalone_editorial_keeps_all_provisions(mock_settings):
+    """When no editorial docs are present, output is unchanged."""
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
+        chain = LegalRAGChain(mock_settings)
+        docs = [_make_doc("provision", f"art-{i}") for i in range(3)]
+        scores = [0.9, 0.8, 0.7]
+
+        stripped_docs, stripped_scores = chain._strip_standalone_editorial(docs, scores)
+
+        assert len(stripped_docs) == 3
+        assert stripped_scores == scores
+
+
+def test_strip_standalone_editorial_preserves_score_alignment(mock_settings):
+    """Score list must stay aligned with docs after stripping."""
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
+        chain = LegalRAGChain(mock_settings)
+        p1 = _make_doc("provision", "art-1")
+        ed = _make_doc("editorial_note", "art-e")
+        p2 = _make_doc("provision", "art-2")
+        docs = [p1, ed, p2]
+        scores = [0.88, 0.75, 0.60]
+
+        stripped_docs, stripped_scores = chain._strip_standalone_editorial(docs, scores)
+
+        assert stripped_docs == [p1, p2]
+        assert stripped_scores == [0.88, 0.60]
+
+
+def test_strip_standalone_editorial_degenerate_all_editorial(mock_settings):
+    """When every doc is editorial, return the originals rather than an empty list."""
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
+        chain = LegalRAGChain(mock_settings)
+        docs = [_make_doc("editorial_note", f"art-e{i}") for i in range(2)]
+        scores = [0.80, 0.70]
+
+        stripped_docs, stripped_scores = chain._strip_standalone_editorial(docs, scores)
+
+        # Falls back to originals — better than returning empty results
+        assert stripped_docs == docs
+        assert stripped_scores == scores
+
+
+# ---------------------------------------------------------------------------
+# Ambiguity gate threshold tests for balanced_v2 values (Fix 1 & Fix 2)
+# ---------------------------------------------------------------------------
+
+
+def test_should_gate_answer_ambiguity_gap_balanced_v2(mock_settings):
+    """With balanced_v2 min_gap=0.12: gap of 0.08 (< 0.12) should gate."""
+    mock_settings.reranker_ambiguity_min_gap = 0.12
+    mock_settings.reranker_ambiguity_top_score_ceiling = 0.80
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
+        chain = LegalRAGChain(mock_settings)
+        # top=0.65, second=0.57 → gap=0.08 < 0.12, top≤0.80 → should gate
+        assert chain.should_gate_answer(0.65, scores=[0.65, 0.57, 0.40]) is True
+
+
+def test_should_not_gate_answer_gap_clear_balanced_v2(mock_settings):
+    """With balanced_v2 min_gap=0.12: gap of 0.15 (> 0.12) should not gate."""
+    mock_settings.reranker_ambiguity_min_gap = 0.12
+    mock_settings.reranker_ambiguity_top_score_ceiling = 0.80
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
+        chain = LegalRAGChain(mock_settings)
+        # top=0.75, second=0.60 → gap=0.15 > 0.12 → should not gate
+        assert chain.should_gate_answer(0.75, scores=[0.75, 0.60, 0.40]) is False
+
+
+def test_should_not_gate_above_ceiling_balanced_v2(mock_settings):
+    """Scores above the 0.80 ceiling are never ambiguity-gated regardless of gap."""
+    mock_settings.reranker_ambiguity_min_gap = 0.12
+    mock_settings.reranker_ambiguity_top_score_ceiling = 0.80
+    with (
+        patch("lovli.chain.QdrantVectorStore"),
+        patch("lovli.chain.HuggingFaceEmbeddings"),
+        patch("lovli.chain.ChatOpenAI"),
+        patch("lovli.chain.QdrantClient"),
+    ):
+        chain = LegalRAGChain(mock_settings)
+        # top=0.85 > 0.80 ceiling → ambiguity check skipped
+        assert chain.should_gate_answer(0.85, scores=[0.85, 0.84, 0.40]) is False
+
+
+# ---------------------------------------------------------------------------
+# balanced_v2 profile presence and values test (Fix 6)
+# ---------------------------------------------------------------------------
+
+
+def test_balanced_v2_profile_values():
+    """balanced_v2 must exist and carry the corrected threshold values."""
+    from lovli.profiles import TRUST_PROFILES
+
+    assert "balanced_v2" in TRUST_PROFILES, "balanced_v2 profile must be registered"
+    p = TRUST_PROFILES["balanced_v2"]
+
+    assert p["reranker_ambiguity_top_score_ceiling"] == 0.80, (
+        "top_ceiling must be raised to 0.80 (was 0.70 in balanced_v1)"
+    )
+    assert p["reranker_ambiguity_min_gap"] == 0.12, (
+        "min_gap must be raised to 0.12 (was 0.05 in balanced_v1)"
+    )
+    assert p["reranker_min_doc_score"] == 0.42, (
+        "min_doc_score must be raised to 0.42 (was 0.32 in balanced_v1)"
+    )
+    assert p["law_routing_summary_dualpass_enabled"] is True, (
+        "dualpass must be enabled in balanced_v2"
+    )
+    # Backward-compatible: balanced_v1 should be unchanged
+    v1 = TRUST_PROFILES["balanced_v1"]
+    assert v1["reranker_ambiguity_top_score_ceiling"] == 0.70
+    assert v1["reranker_ambiguity_min_gap"] == 0.05
+    assert v1["reranker_min_doc_score"] == 0.32
