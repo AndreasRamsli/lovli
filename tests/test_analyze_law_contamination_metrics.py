@@ -17,23 +17,23 @@ def _load_analyze_module():
     if module_name in sys.modules:
         return sys.modules[module_name]
 
-    dotenv_stub = types.ModuleType("dotenv")
+    dotenv_stub: Any = types.ModuleType("dotenv")
     dotenv_stub.load_dotenv = lambda *_args, **_kwargs: None
     sys.modules.setdefault("dotenv", dotenv_stub)
 
-    lovli_chain_stub = types.ModuleType("lovli.chain")
+    lovli_chain_stub: Any = types.ModuleType("lovli.chain")
     lovli_chain_stub.LegalRAGChain = object
     sys.modules.setdefault("lovli.chain", lovli_chain_stub)
 
-    lovli_config_stub = types.ModuleType("lovli.config")
+    lovli_config_stub: Any = types.ModuleType("lovli.config")
     lovli_config_stub.get_settings = lambda: None
     sys.modules.setdefault("lovli.config", lovli_config_stub)
 
-    lovli_retrieval_stub = types.ModuleType("lovli.scoring")
+    lovli_retrieval_stub: Any = types.ModuleType("lovli.scoring")
     lovli_retrieval_stub.matches_expected_source = lambda *_args, **_kwargs: False
     sys.modules.setdefault("lovli.scoring", lovli_retrieval_stub)
 
-    lovli_trust_profiles_stub = types.ModuleType("lovli.profiles")
+    lovli_trust_profiles_stub: Any = types.ModuleType("lovli.profiles")
     lovli_trust_profiles_stub.apply_trust_profile = lambda *_args, **_kwargs: "balanced_v1"
     sys.modules.setdefault("lovli.profiles", lovli_trust_profiles_stub)
 

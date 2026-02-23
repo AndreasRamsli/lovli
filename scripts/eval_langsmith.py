@@ -468,6 +468,7 @@ def main():
         context = {"documents": outputs.get("retrieved_context", [])}
         return retrieval_relevance_evaluator(
             inputs=inputs,
+            outputs=outputs,
             context=context,
         )
 
@@ -530,13 +531,14 @@ def main():
     logger.info(f"Using project: {project_name}")
 
     try:
-        experiment_results = client.evaluate(
+        _raw_results = client.evaluate(
             target,
             data=dataset_name,
             evaluators=evaluators,
             experiment_prefix="lovli-eval",
             max_concurrency=2,
         )
+        experiment_results: Any = _raw_results
 
         logger.info("\n" + "=" * 60)
         logger.info("Evaluation completed!")

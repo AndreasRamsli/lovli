@@ -3,6 +3,7 @@
 import logging
 from pathlib import Path
 from typing import Any
+from pydantic import SecretStr
 from collections.abc import Iterator
 from langchain_qdrant import QdrantVectorStore, RetrievalMode
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -155,10 +156,8 @@ class LegalRAGChain:
                         self.settings.qdrant_collection_name
                     )
                     config = collection_info.config
-                    if hasattr(config, "params") and hasattr(
-                        config.params, "sparse_vectors_config"
-                    ):
-                        sparse_cfg = config.params.sparse_vectors_config
+                    if hasattr(config, "params") and hasattr(config.params, "sparse_vectors"):
+                        sparse_cfg = config.params.sparse_vectors
                         if sparse_cfg and len(sparse_cfg) > 0:
                             self._uses_named_vectors = True
             except Exception:
@@ -187,7 +186,7 @@ class LegalRAGChain:
         self.llm = ChatOpenAI(
             model=self.settings.llm_model,
             temperature=self.settings.llm_temperature,
-            api_key=self.settings.openrouter_api_key,
+            api_key=SecretStr(self.settings.openrouter_api_key),
             base_url=self.settings.openrouter_base_url,
             default_headers={
                 "HTTP-Referer": "https://github.com/lovli",
@@ -407,7 +406,7 @@ Kontekst fra lovtekster:
         sources = []
         seen_ids = set()
         for doc in docs:
-            metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+            metadata = doc.metadata
             article_id = metadata.get("article_id", "Unknown")
             law_id = metadata.get("law_id", "Unknown")
             source_key = (law_id, article_id)
@@ -603,7 +602,7 @@ Kontekst fra lovtekster:
         provisions: list = []
         provision_scores: list[float] = []
         for i, doc in enumerate(docs):
-            metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+            metadata = doc.metadata
             if _infer_doc_type(metadata) != "editorial_note":
                 provisions.append(doc)
                 if has_aligned_scores:
@@ -635,15 +634,15 @@ Kontekst fra lovtekster:
         has_aligned_scores = bool(scores) and len(scores) == len(docs)
         provisions: list = []
         provision_scores: list[float] = []
-        if has_aligned_scores:
+        if has_aligned_scores and scores is not None:
             for doc, score in zip(docs, scores, strict=True):
-                metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+                metadata = doc.metadata
                 if _infer_doc_type(metadata) != "editorial_note":
                     provisions.append(doc)
                     provision_scores.append(score)
         else:
             for doc in docs:
-                metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+                metadata = doc.metadata
                 if _infer_doc_type(metadata) != "editorial_note":
                     provisions.append(doc)
         if not provisions:
@@ -794,7 +793,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
                 # Note: ChatOpenAI doesn't support timeout directly, but OpenRouter may
                 response = self.llm.invoke(rewrite_prompt)
                 rewritten = (
-                    response.content.strip()
+                    str(response.content).strip()
                     if hasattr(response, "content")
                     else str(response).strip()
                 )
@@ -1137,7 +1136,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
         # This means: "any article in law A that starts with prefix P1, OR
         #              any article in law A that starts with prefix P2, OR
         #              any article in law B that starts with prefix P1, ..."
-        should_clauses: list[qdrant_models.Filter] = []
+        should_clauses: list[Any] = []
         for law_id in law_ids:
             for prefix in article_id_prefixes:
                 should_clauses.append(
@@ -1253,7 +1252,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
         }
         stage1_law_ids = set()
         for doc in docs:
-            metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+            metadata = doc.metadata
             law_id = (metadata.get("law_id") or "").strip()
             if law_id:
                 stage1_law_ids.add(law_id)
@@ -1355,7 +1354,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
 
         grouped_indices: dict[str, list[int]] = {}
         for idx, doc in enumerate(docs):
-            metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+            metadata = doc.metadata
             law_id = (metadata.get("law_id") or "").strip() or "__unknown__"
             grouped_indices.setdefault(law_id, []).append(idx)
 
@@ -1367,7 +1366,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
 
         candidates = []
         for idx, doc in enumerate(docs):
-            metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+            metadata = doc.metadata
             candidates.append(
                 {
                     "index": idx,
@@ -1445,7 +1444,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
 
         candidates: list[dict[str, Any]] = []
         for idx, (doc, score) in enumerate(zip(docs, scores, strict=True)):
-            metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+            metadata = doc.metadata
             candidates.append(
                 {
                     "index": idx,
@@ -1537,7 +1536,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
             seen_article_keys = set()
             deduplicated_docs = []
             for doc in docs:
-                metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+                metadata = doc.metadata
                 article_id = metadata.get("article_id")
                 law_id = metadata.get("law_id")
                 article_key = (law_id, article_id)
@@ -1638,7 +1637,7 @@ Omskriv spørsmålet som et selvstendig spørsmål om norsk lov. Hvis spørsmål
 
         for chunk in self.llm.stream(messages):
             if chunk.content:
-                yield chunk.content
+                yield str(chunk.content)
 
     def query(
         self, question: str, chat_history: list[dict[str, str]] | None = None

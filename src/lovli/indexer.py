@@ -4,9 +4,16 @@ import hashlib
 import json
 import logging
 from collections.abc import Iterator
+from typing import Any
 from pathlib import Path
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, SparseVectorParams, PointStruct
+from qdrant_client.models import (
+    Distance,
+    VectorParams,
+    SparseVectorParams,
+    PointStruct,
+    PayloadSchemaType,
+)
 from sentence_transformers import SentenceTransformer
 
 from .config import Settings
@@ -67,7 +74,9 @@ class LegalIndexer:
                 # Use in-memory Qdrant (for testing without Docker)
                 if self.settings.qdrant_persist_path:
                     self.client = QdrantClient(path=self.settings.qdrant_persist_path)
-                    logger.info(f"Using Qdrant with persistence at {self.settings.qdrant_persist_path}")
+                    logger.info(
+                        f"Using Qdrant with persistence at {self.settings.qdrant_persist_path}"
+                    )
                 else:
                     self.client = QdrantClient(":memory:")
                     logger.info("Using in-memory Qdrant (data will not persist)")
@@ -93,7 +102,9 @@ class LegalIndexer:
             try:
                 from FlagEmbedding import BGEM3FlagModel
 
-                logger.info(f"Loading BGE-M3 via FlagEmbedding (native API): {self.settings.embedding_model_name}")
+                logger.info(
+                    f"Loading BGE-M3 via FlagEmbedding (native API): {self.settings.embedding_model_name}"
+                )
                 self._flag_model = BGEM3FlagModel(
                     self.settings.embedding_model_name,
                     use_fp16=True,
@@ -101,9 +112,13 @@ class LegalIndexer:
                 self._use_native_api = True
                 logger.info("BGE-M3 loaded with native API (dense + sparse support)")
             except ImportError:
-                logger.info("FlagEmbedding not installed, falling back to SentenceTransformer (dense-only)")
+                logger.info(
+                    "FlagEmbedding not installed, falling back to SentenceTransformer (dense-only)"
+                )
             except Exception as e:
-                logger.warning(f"Failed to load BGEM3FlagModel: {e}. Falling back to SentenceTransformer.")
+                logger.warning(
+                    f"Failed to load BGEM3FlagModel: {e}. Falling back to SentenceTransformer."
+                )
 
         # Fall back to SentenceTransformer for dense-only encoding
         if not self._use_native_api:
@@ -149,9 +164,7 @@ class LegalIndexer:
             logger.error(f"Error checking collection existence: {e}")
             return False
 
-    def create_collection(
-        self, collection_name: str | None = None, recreate: bool = False
-    ) -> None:
+    def create_collection(self, collection_name: str | None = None, recreate: bool = False) -> None:
         """
         Create a Qdrant collection for storing legal articles.
 
@@ -177,10 +190,12 @@ class LegalIndexer:
         if self._has_sparse:
             # Use named dense vector + named sparse vector for hybrid search.
             # Named vectors are required when combining dense and sparse in Qdrant.
-            vectors_config = {"dense": VectorParams(
-                size=self.settings.embedding_dimension,
-                distance=Distance.COSINE,
-            )}
+            vectors_config = {
+                "dense": VectorParams(
+                    size=self.settings.embedding_dimension,
+                    distance=Distance.COSINE,
+                )
+            }
             sparse_vectors_config = {"sparse": SparseVectorParams()}
             logger.info("Configuring named vectors (dense + sparse) for hybrid search")
         else:
@@ -190,7 +205,7 @@ class LegalIndexer:
                 distance=Distance.COSINE,
             )
             sparse_vectors_config = None
-        
+
         self.client.create_collection(
             collection_name=name,
             vectors_config=vectors_config,
@@ -216,7 +231,7 @@ class LegalIndexer:
                 self.client.create_payload_index(
                     collection_name=name,
                     field_name=field_name,
-                    field_schema="keyword",
+                    field_schema=PayloadSchemaType.KEYWORD,
                     wait=True,
                 )
                 logger.info("Ensured payload index: %s", field_name)
@@ -265,9 +280,7 @@ class LegalIndexer:
                 # Batch insert
                 if len(batch) >= self.settings.index_batch_size:
                     count += self._process_batch(batch)
-                    logger.debug(
-                        f"Indexed batch of {len(batch)} articles (total: {count})"
-                    )
+                    logger.debug(f"Indexed batch of {len(batch)} articles (total: {count})")
                     batch = []
                     batch_ids = set()
 
@@ -308,10 +321,11 @@ class LegalIndexer:
                     else:
                         dense_embeddings.extend(result)
                 else:
-                    # SentenceTransformer: dense-only encoding
-                    chunk_embeddings = self.embedding_model.encode(
-                        chunk, show_progress_bar=False
-                    )
+                    # SentenceTransformer: dense-only encoding.
+                    # embedding_model is always set when _use_native_api=False
+                    # (the constructor raises if SentenceTransformer fails to load).
+                    assert self.embedding_model is not None
+                    chunk_embeddings = self.embedding_model.encode(chunk, show_progress_bar=False)
                     dense_embeddings.extend(chunk_embeddings)
             except Exception as e:
                 logger.error(f"Failed to generate embeddings for batch chunk: {e}")
@@ -330,8 +344,11 @@ class LegalIndexer:
                 sparse_vector = self._convert_sparse_vector(sparse_vec, article.article_id)
 
             # Use named vectors for hybrid search, or default vector for dense-only
+            if dense_vector is None:
+                logger.warning("No dense vector for article %s, skipping", article.article_id)
+                continue
             if sparse_vector and self._has_sparse:
-                vectors = {
+                vectors: Any = {
                     "dense": dense_vector,
                     "sparse": sparse_vector,
                 }
@@ -434,8 +451,12 @@ class LegalIndexer:
         elif hasattr(sparse_vec, "indices") and hasattr(sparse_vec, "values"):
             # Scipy sparse format
             return {
-                "indices": sparse_vec.indices.tolist() if hasattr(sparse_vec.indices, "tolist") else list(sparse_vec.indices),
-                "values": sparse_vec.values.tolist() if hasattr(sparse_vec.values, "tolist") else list(sparse_vec.values),
+                "indices": sparse_vec.indices.tolist()
+                if hasattr(sparse_vec.indices, "tolist")
+                else list(sparse_vec.indices),
+                "values": sparse_vec.values.tolist()
+                if hasattr(sparse_vec.values, "tolist")
+                else list(sparse_vec.values),
             }
         elif isinstance(sparse_vec, (list, tuple)) and len(sparse_vec) == 2:
             return {

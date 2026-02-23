@@ -346,7 +346,7 @@ def _process_single_question(
     dedup_docs = []
     seen_keys = set()
     for doc in docs:
-        metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+        metadata = doc.metadata
         key = (metadata.get("law_id"), metadata.get("article_id"))
         if metadata.get("article_id") and key not in seen_keys:
             seen_keys.add(key)
@@ -369,7 +369,7 @@ def _process_single_question(
             raw_scores = [1.0] * len(docs)
         normalized = normalize_sigmoid_scores(raw_scores)
         for doc, score in zip(docs, normalized, strict=True):
-            metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+            metadata = doc.metadata
             candidates.append(
                 {
                     "law_id": metadata.get("law_id", ""),
@@ -1101,10 +1101,7 @@ def main() -> None:
     profile_name = os.getenv("TRUST_PROFILE", settings.trust_profile_name)
     resolved_profile = apply_trust_profile(settings, profile_name)
     run_started_at = datetime.now(UTC).isoformat()
-    run_id = (
-        os.getenv("LOVLI_RUN_ID")
-        or f"sweep_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
-    )
+    run_id = os.getenv("LOVLI_RUN_ID") or f"sweep_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
     questions_sha256 = _sha256_file(questions_path)
     git_commit = _safe_git_commit()
     logger.info(
@@ -1504,24 +1501,27 @@ def main() -> None:
             continue
         apply_combo_to_chain(
             chain,
-            retrieval_k_initial,
-            retrieval_k,
+            int(retrieval_k_initial),
+            int(retrieval_k),
             confidence,
             min_doc,
             min_gap,
             top_score_ceiling,
-            routing_fallback_unfiltered,
-            reranker_context_enrichment,
-            routing_summary_dualpass,
+            bool(routing_fallback_unfiltered),
+            bool(reranker_context_enrichment),
+            bool(routing_summary_dualpass),
             direct_mention_bonus=direct_mention_bonus,
             rank_fusion_doc_weight=rank_fusion_doc_weight,
         )
+        _mode_key = (
+            bool(routing_fallback_unfiltered),
+            bool(reranker_context_enrichment),
+            bool(routing_summary_dualpass),
+        )
         metrics = evaluate_combo(
             chain,
-            cached_candidates_by_mode[
-                (routing_fallback_unfiltered, reranker_context_enrichment, routing_summary_dualpass)
-            ],
-            retrieval_k_initial=retrieval_k_initial,
+            cached_candidates_by_mode[_mode_key],
+            retrieval_k_initial=int(retrieval_k_initial),
             confidence_threshold=confidence,
             min_doc_score=min_doc,
             ambiguity_min_gap=min_gap,

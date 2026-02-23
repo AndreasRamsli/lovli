@@ -10,7 +10,7 @@ from lovli.parser import (
     _extract_short_name,
     _extract_cross_references,
 )
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 
 # Path to test data (Husleieloven)
@@ -64,6 +64,7 @@ class TestExtractCrossReferences:
         """
         soup = BeautifulSoup(html, "html.parser")
         article = soup.find("article")
+        assert isinstance(article, Tag)
         refs = _extract_cross_references(article, "lov/1999-03-26-17")
         assert "lov/2002-06-21-34" in refs
         assert "lov/2005-06-17-90/§5" in refs
@@ -76,6 +77,7 @@ class TestExtractCrossReferences:
         """
         soup = BeautifulSoup(html, "html.parser")
         article = soup.find("article")
+        assert isinstance(article, Tag)
         refs = _extract_cross_references(article, "lov/1999-03-26-17")
         assert len(refs) == 0
 
@@ -90,6 +92,7 @@ class TestExtractCrossReferences:
         """
         soup = BeautifulSoup(html, "html.parser")
         article = soup.find("article")
+        assert isinstance(article, Tag)
         refs = _extract_cross_references(article, "lov/1999-03-26-017")
         assert refs == []
 
@@ -101,6 +104,7 @@ class TestExtractCrossReferences:
         """
         soup = BeautifulSoup(html, "html.parser")
         article = soup.find("article")
+        assert isinstance(article, Tag)
         refs = _extract_cross_references(article, "lov/1999-03-26-17")
         assert "forskrift/2009-06-12-641" in refs
 
@@ -112,6 +116,7 @@ class TestExtractCrossReferences:
         """
         soup = BeautifulSoup(html, "html.parser")
         article = soup.find("article")
+        assert isinstance(article, Tag)
         refs = _extract_cross_references(article, "lov/1999-03-26-17")
         assert len(refs) == 1
 
@@ -119,6 +124,7 @@ class TestExtractCrossReferences:
         html = '<article id="test"><p>No links here</p></article>'
         soup = BeautifulSoup(html, "html.parser")
         article = soup.find("article")
+        assert isinstance(article, Tag)
         refs = _extract_cross_references(article, "lov/1999-03-26-17")
         assert refs == []
 
@@ -131,6 +137,7 @@ class TestExtractCrossReferences:
         """
         soup = BeautifulSoup(html, "html.parser")
         article = soup.find("article")
+        assert isinstance(article, Tag)
         refs = _extract_cross_references(article, "lov/1999-03-26-17")
         assert refs == []
 
@@ -443,12 +450,14 @@ class TestParseHusleieloven:
     def test_chapter_id_format(self):
         articles = list(parse_xml_file(HUSLEIELOVEN_PATH))
         for art in articles:
+            assert art.chapter_id is not None
             assert art.chapter_id.startswith("kapittel-"), f"Bad chapter_id: {art.chapter_id}"
 
     def test_chapter_title_cleaned(self):
         """Chapter titles should not have the 'Kapittel X.' prefix."""
         articles = list(parse_xml_file(HUSLEIELOVEN_PATH))
         for art in articles:
+            assert art.chapter_title is not None
             assert not art.chapter_title.startswith("Kapittel "), (
                 f"Chapter title not cleaned: {art.chapter_title}"
             )
@@ -462,6 +471,7 @@ class TestParseHusleieloven:
         assert "Depositum" in art.title
         assert art.chapter_id == "kapittel-3"
         assert "seks" in art.content.lower()  # "seks måneders leie"
+        assert art.url is not None
         assert art.url.endswith("#kapittel-3-paragraf-5")
 
     def test_cross_references_present(self):
@@ -488,6 +498,7 @@ class TestParseHusleieloven:
     def test_url_format(self):
         articles = list(parse_xml_file(HUSLEIELOVEN_PATH))
         for art in articles:
+            assert art.url is not None
             assert art.url.startswith("https://lovdata.no/lov/")
             assert "/lov/1999-03-26-17#" in art.url
 
@@ -506,6 +517,7 @@ class TestParseHusleieloven:
         assert len(oppsigelsesfrist) == 1
         art = oppsigelsesfrist[0]
         assert art.source_anchor_id == "kapittel-9-paragraf-7"
+        assert art.url is not None
         assert art.url.endswith("#kapittel-9-paragraf-7")
 
     def test_law_id(self):

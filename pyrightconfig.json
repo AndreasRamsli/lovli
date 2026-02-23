@@ -1,0 +1,8 @@
+{
+  "pythonVersion": "3.11",
+  "venvPath": "/Users/andreas/miniconda3",
+  "venv": "base",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "none",
+  "include": ["src", "scripts", "tests"]
+}

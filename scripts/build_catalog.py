@@ -38,6 +38,7 @@ root_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(root_dir / "src"))
 
 from dotenv import load_dotenv
+
 load_dotenv(root_dir / ".env")
 
 from lovli.catalog import (
@@ -59,12 +60,13 @@ def _init_llm():
     """Initialize LLM for summary generation."""
     from lovli.config import get_settings
     from langchain_openai import ChatOpenAI
+    from pydantic import SecretStr
 
     settings = get_settings()
     llm = ChatOpenAI(
         model=settings.llm_model,
         temperature=0.3,
-        api_key=settings.openrouter_api_key,
+        api_key=SecretStr(settings.openrouter_api_key),
         base_url=settings.openrouter_base_url,
         default_headers={
             "HTTP-Referer": "https://github.com/lovli",
@@ -76,9 +78,7 @@ def _init_llm():
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Build a law catalog from Lovdata files."
-    )
+    parser = argparse.ArgumentParser(description="Build a law catalog from Lovdata files.")
     parser.add_argument(
         "data_dir",
         nargs="+",
@@ -131,7 +131,9 @@ def main():
         # Normal build mode
         invalid_dirs = [path for path in args.data_dir if not path.is_dir()]
         if invalid_dirs:
-            logger.error("Invalid directory inputs: %s", ", ".join(str(path) for path in invalid_dirs))
+            logger.error(
+                "Invalid directory inputs: %s", ", ".join(str(path) for path in invalid_dirs)
+            )
             sys.exit(1)
 
         llm = None

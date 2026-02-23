@@ -6,9 +6,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Iterator
 
-from bs4 import BeautifulSoup, Tag, SoupStrainer
+from bs4 import BeautifulSoup, Tag
+from bs4.filter import SoupStrainer
 
 logger = logging.getLogger(__name__)
+
+
+def _attr_str(value: object) -> str:
+    """Coerce a BeautifulSoup attribute value to str.
+
+    bs4 tag attributes are typed as ``str | list[str]`` (multi-valued attrs
+    are returned as a list).  We always treat them as plain strings here —
+    Lovdata HTML never uses multi-valued id/href attributes.
+    """
+    if isinstance(value, list):
+        return " ".join(value)
+    return str(value) if value is not None else ""
+
 
 # Base URL for Lovdata links
 LOVDATA_BASE_URL = "https://lovdata.no"
@@ -150,7 +164,7 @@ def _extract_cross_references(article_element: Tag, self_law_ref: str) -> list[s
     self_law_ref_normalized = _canonicalize_law_ref(self_law_ref)
 
     for a_tag in article_element.find_all("a", href=True):
-        href = a_tag.get("href", "")
+        href = _attr_str(a_tag.get("href", ""))
         if not href:
             continue
 
@@ -408,7 +422,7 @@ def _parse_hierarchical(
 
     for section in sections:
         last_provision_article_id: str | None = None
-        chapter_id = section.get("id", "")
+        chapter_id: str = _attr_str(section.get("id", ""))
         h2 = section.find("h2")
         chapter_title = h2.get_text(strip=True) if h2 else None
 
@@ -491,7 +505,7 @@ def _extract_article(
     """Extract a single LegalArticle from an <article> element."""
     try:
         # Article ID from the element's id attribute
-        raw_article_id = article.get("id")
+        raw_article_id: str = _attr_str(article.get("id"))
         if not raw_article_id:
             chapter_scope = chapter_id or "flat"
             # Include chapter scope to avoid collisions when idx resets per section.

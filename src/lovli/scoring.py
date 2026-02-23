@@ -145,12 +145,12 @@ def build_law_cross_reference_affinity(
             law_stats = _compute_law_stats(candidates, max_weight=max_weight)
             dominant_law_id = law_stats[0]["law_id"] if law_stats else None
         else:
-            law_stats: list[tuple[str, int, float]] = []
+            law_stats_simple: list[tuple[str, int, float]] = []
             for law_id, rows in grouped.items():
                 max_score = max(float(row.get("score", 0.0)) for row in rows)
-                law_stats.append((law_id, len(rows), max_score))
-            law_stats.sort(key=lambda item: (item[1], item[2]), reverse=True)
-            dominant_law_id = law_stats[0][0] if law_stats else None
+                law_stats_simple.append((law_id, len(rows), max_score))
+            law_stats_simple.sort(key=lambda item: (item[1], item[2]), reverse=True)
+            dominant_law_id = law_stats_simple[0][0] if law_stats_simple else None
     if not dominant_law_id or dominant_law_id not in grouped:
         return dict.fromkeys(grouped.keys(), 0.0)
 

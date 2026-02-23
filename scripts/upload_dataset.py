@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 from langsmith import Client
@@ -39,11 +40,11 @@ def get_langsmith_endpoint() -> str | None:
 def main():
     """Upload questions.jsonl to LangSmith as a dataset."""
     questions_path = root_dir / "eval" / "questions.jsonl"
-    
+
     if not questions_path.exists():
         logger.error(f"Questions file not found: {questions_path}")
         sys.exit(1)
-    
+
     # Check for API key (try both uppercase and lowercase)
     api_key = os.getenv("LANGSMITH_API_KEY") or os.getenv("langsmith_api_key")
     if not api_key:
@@ -52,17 +53,20 @@ def main():
             "Please set it in your .env file (as LANGSMITH_API_KEY) or export it."
         )
         sys.exit(1)
-    
+
     # Initialize LangSmith client with EU endpoint if specified
     endpoint = get_langsmith_endpoint()
-    client_kwargs = {"api_key": api_key}
+    client_kwargs: dict[str, Any] = {"api_key": api_key}
     if endpoint:
         logger.info(f"Using LangSmith endpoint: {endpoint}")
         client_kwargs["api_url"] = endpoint
     else:
         logger.warning("Using default LangSmith endpoint (set LANGSMITH_ENDPOINT env var for EU)")
-        logger.info("Available env vars: " + ", ".join([k for k in os.environ.keys() if "LANGSMITH" in k or "LANGCHAIN" in k]))
-    
+        logger.info(
+            "Available env vars: "
+            + ", ".join([k for k in os.environ.keys() if "LANGSMITH" in k or "LANGCHAIN" in k])
+        )
+
     logger.debug(f"Client kwargs: {list(client_kwargs.keys())}")
     try:
         client = Client(**client_kwargs)
@@ -72,28 +76,34 @@ def main():
         logger.error(f"Failed to initialize LangSmith client: {e}")
         logger.error("Please verify:")
         logger.error("  1. LANGSMITH_API_KEY is correct")
-        logger.error("  2. LANGSMITH_ENDPOINT is set correctly (https://eu.api.smith.langchain.com for EU)")
+        logger.error(
+            "  2. LANGSMITH_ENDPOINT is set correctly (https://eu.api.smith.langchain.com for EU)"
+        )
         logger.error("  3. Your API key has the necessary permissions")
         sys.exit(1)
-    
+
     # Load questions from JSONL
     questions = []
     with open(questions_path, encoding="utf-8") as f:
         for line in f:
             if line.strip():
                 questions.append(json.loads(line))
-    
+
     logger.info(f"Loaded {len(questions)} questions from {questions_path}")
-    
+
     # Create dataset
     dataset_name = "lovli-eval-questions"
-    dataset_description = "Evaluation questions for Lovli RAG pipeline with expected articles and reference notes"
-    
+    dataset_description = (
+        "Evaluation questions for Lovli RAG pipeline with expected articles and reference notes"
+    )
+
     try:
         # Check if dataset already exists
         existing_datasets = list(client.list_datasets(dataset_name=dataset_name))
         if existing_datasets:
-            logger.warning(f"Dataset '{dataset_name}' already exists. Use the existing dataset or delete it first.")
+            logger.warning(
+                f"Dataset '{dataset_name}' already exists. Use the existing dataset or delete it first."
+            )
             dataset_id = existing_datasets[0].id
             logger.info(f"Existing dataset ID: {dataset_id}")
         else:
@@ -111,13 +121,15 @@ def main():
             logger.error("  1. Your API key may not have dataset creation permissions")
             logger.error("  2. Check your LangSmith workspace settings")
             logger.error("  3. Verify you're using the correct endpoint for your region")
-            logger.error(f"  4. Current endpoint: {endpoint or 'default (api.smith.langchain.com)'}")
+            logger.error(
+                f"  4. Current endpoint: {endpoint or 'default (api.smith.langchain.com)'}"
+            )
         elif "401" in error_msg or "Unauthorized" in error_msg:
             logger.error("\n401 Unauthorized error suggests:")
             logger.error("  1. Your API key is invalid or expired")
             logger.error("  2. Check that LANGSMITH_API_KEY is set correctly")
         sys.exit(1)
-    
+
     # Prepare examples for LangSmith
     examples = []
     for q in questions:
@@ -139,7 +151,7 @@ def main():
             },
         }
         examples.append(example)
-    
+
     # Upload examples to dataset
     try:
         client.create_examples(

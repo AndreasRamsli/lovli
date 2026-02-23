@@ -496,5 +496,5 @@ def get_settings() -> Settings:
     """
     global _settings_instance
     if _settings_instance is None:
-        _settings_instance = Settings()
+        _settings_instance = Settings()  # type: ignore[call-arg]
     return _settings_instance

@@ -130,7 +130,7 @@ def analyze_question(
     dedup_docs = []
     seen = set()
     for doc in docs:
-        metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+        metadata = doc.metadata
         key = (metadata.get("law_id"), metadata.get("article_id"))
         if metadata.get("article_id") and key in seen:
             continue
@@ -149,7 +149,7 @@ def analyze_question(
     # Keep provision docs only in diagnostics.
     provision_rows: list[dict[str, Any]] = []
     for doc, score in zip(reranked_docs, scores, strict=True):
-        metadata = doc.metadata if hasattr(doc, "metadata") else doc.get("metadata", {})
+        metadata = doc.metadata
         if (metadata.get("doc_type") or "provision") == "editorial_note":
             continue
         provision_rows.append(
@@ -586,10 +586,7 @@ def main() -> None:
     profile_name = os.getenv("TRUST_PROFILE", settings.trust_profile_name)
     resolved_profile = apply_trust_profile(settings, profile_name)
     run_started_at = datetime.now(UTC).isoformat()
-    run_id = (
-        os.getenv("LOVLI_RUN_ID")
-        or f"contam_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
-    )
+    run_id = os.getenv("LOVLI_RUN_ID") or f"contam_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
     git_commit = _safe_git_commit()
     questions_sha256 = _sha256_file(args.questions)
     logger.info(
@@ -669,8 +666,9 @@ def main() -> None:
         parallel_workers = 0
 
     retrieval_k = retrieval_k_initial
+    rows: list[dict[str, Any]] = []
     if parallel_workers > 0:
-        rows = [None] * len(questions)
+        _rows_buf: list[dict[str, Any] | None] = [None] * len(questions)
         with ThreadPoolExecutor(max_workers=parallel_workers) as executor:
             future_to_idx = {
                 executor.submit(analyze_question, chain, row, retrieval_k_initial=retrieval_k): idx
@@ -679,12 +677,12 @@ def main() -> None:
             done = 0
             for future in as_completed(future_to_idx):
                 idx = future_to_idx[future]
-                rows[idx] = future.result()
+                _rows_buf[idx] = future.result()
                 done += 1
                 if done % 10 == 0 or done == len(questions):
                     logger.info("Processed %s/%s questions", done, len(questions))
+        rows = [r for r in _rows_buf if r is not None]
     else:
-        rows = []
         for idx, row in enumerate(questions, start=1):
             rows.append(analyze_question(chain, row, retrieval_k_initial=retrieval_k))
             if idx % 10 == 0 or idx == len(questions):
@@ -727,7 +725,7 @@ def main() -> None:
     with open(args.output, "w", encoding="utf-8") as handle:
         json.dump(report, handle, ensure_ascii=False, indent=2)
 
-    if cache_path:
+    if cache_path and cache_dir:
         cache_dir.mkdir(parents=True, exist_ok=True)
         try:
             with open(cache_path, "w", encoding="utf-8") as f:

@@ -20,6 +20,7 @@ import argparse
 import logging
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
@@ -94,11 +95,11 @@ def migrate_collection(
             payload["metadata"] = metadata
             changed += 1
 
-            if apply:
+            if apply and point.vector is not None:
                 updates.append(
                     PointStruct(
                         id=point.id,
-                        vector=point.vector,
+                        vector=cast(Any, point.vector),
                         payload=payload,
                     )
                 )

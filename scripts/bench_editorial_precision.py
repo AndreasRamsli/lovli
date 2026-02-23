@@ -29,8 +29,10 @@ import importlib.util
 
 _sweep_path = ROOT_DIR / "scripts" / "sweep_retrieval_thresholds.py"
 _spec = importlib.util.spec_from_file_location("sweep_retrieval_thresholds", _sweep_path)
+if _spec is None or _spec.loader is None:
+    raise ImportError(f"Cannot load sweep module from {_sweep_path}")
 _sweep_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_sweep_mod)
+_spec.loader.exec_module(_sweep_mod)  # type: ignore[union-attr]
 apply_combo_to_chain = _sweep_mod.apply_combo_to_chain
 load_questions = _sweep_mod.load_questions
 precompute_candidates = _sweep_mod.precompute_candidates
