@@ -53,6 +53,22 @@ def _text(elem) -> str:
     return elem.get_text(strip=True)
 
 
+def _heading_text(elem) -> str:
+    """Get text from a heading element, stripping footnote reference superscripts.
+
+    Lovdata headings sometimes contain <sup class="footnotereference"> elements
+    (e.g. "Forordning<sup>1</sup>") that must not be included in the heading.
+    """
+    if elem is None:
+        return ""
+    import copy
+
+    elem = copy.copy(elem)
+    for sup in elem.find_all("sup", class_="footnotereference"):
+        sup.decompose()
+    return elem.get_text(strip=True)
+
+
 def _extract_metadata(soup: BeautifulSoup, filename: str) -> dict[str, str]:
     """Extract header metadata into a dict."""
     meta: dict[str, str] = {}
@@ -237,10 +253,10 @@ def _extract_article_title(article: Tag) -> str | None:
     value_span = heading.find("span", class_="legalArticleValue")
     title_span = heading.find("span", class_="legalArticleTitle")
     if value_span and title_span:
-        return f"{_text(value_span)}. {_text(title_span)}"
+        return f"{_heading_text(value_span)}. {_heading_text(title_span)}"
     if value_span:
-        return _text(value_span)
-    return _text(heading)
+        return _heading_text(value_span)
+    return _heading_text(heading)
 
 
 def convert_file(xml_path: Path) -> str:
@@ -336,7 +352,7 @@ def _convert_section(section: Tag, lines: list[str]) -> None:
     """
     h2 = section.find("h2", recursive=False)
     if h2:
-        lines.append(f"## {_text(h2)}")
+        lines.append(f"## {_heading_text(h2)}")
         lines.append("")
 
     for child in section.children:
@@ -386,7 +402,7 @@ def _convert_subsection(section: Tag, lines: list[str]) -> None:
             if isinstance(cls, str):
                 cls = [cls]
             if "legalArticleHeader" not in cls:
-                title_text = _text(child)
+                title_text = _heading_text(child)
                 if title_text:
                     lines.append(f"#### {title_text}")
                     lines.append("")
